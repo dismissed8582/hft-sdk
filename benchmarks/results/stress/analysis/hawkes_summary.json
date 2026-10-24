@@ -1,0 +1,98 @@
+{
+  "UF/lob": {
+    "scheme": "UF",
+    "signal": "lob",
+    "estimator": "ct-mle",
+    "fit_success": true,
+    "samples": 1086,
+    "spectral_radius": 0.16036530842983532,
+    "reported_spectral_radius": 0.16036530842983532,
+    "stabilized": false,
+    "aligned_norm": 0.07666816583557427,
+    "aligned_sum": 0.14393367132174745
+  },
+  "LF/lob": {
+    "scheme": "LF",
+    "signal": "lob",
+    "estimator": "ct-mle",
+    "fit_success": true,
+    "samples": 1078,
+    "spectral_radius": 0.13583537749438218,
+    "reported_spectral_radius": 0.13583537749438218,
+    "stabilized": false,
+    "aligned_norm": 0.045947198439819634,
+    "aligned_sum": 0.07935909381085124
+  },
+  "MF/lob": {
+    "scheme": "MF",
+    "signal": "lob",
+    "estimator": "ct-mle",
+    "fit_success": true,
+    "samples": 1104,
+    "spectral_radius": 0.11965037586572261,
+    "reported_spectral_radius": 0.11965037586572261,
+    "stabilized": false,
+    "aligned_norm": 0.07246474760373874,
+    "aligned_sum": 0.13360776756838377
+  },
+  "MTF/lob": {
+    "scheme": "MTF",
+    "signal": "lob",
+    "estimator": "ct-mle",
+    "fit_success": true,
+    "samples": 1109,
+    "spectral_radius": 0.11802791131313073,
+    "reported_spectral_radius": 0.11802791131313073,
+    "stabilized": false,
+    "aligned_norm": 0.07239778506007837,
+    "aligned_sum": 0.13384931778564543
+  },
+  "UF/trade": {
+    "scheme": "UF",
+    "signal": "trade",
+    "estimator": "ct-mle",
+    "fit_success": true,
+    "samples": 1221,
+    "spectral_radius": 0.13478345790948348,
+    "reported_spectral_radius": 0.13478345790948348,
+    "stabilized": false,
+    "aligned_norm": 0.05228009444896708,
+    "aligned_sum": 0.11372942402709424
+  },
+  "LF/trade": {
+    "scheme": "LF",
+    "signal": "trade",
+    "estimator": "ct-mle",
+    "fit_success": true,
+    "samples": 1220,
+    "spectral_radius": 0.1349438930516281,
+    "reported_spectral_radius": 0.1349438930516281,
+    "stabilized": false,
+    "aligned_norm": 0.05209663046274275,
+    "aligned_sum": 0.11325906811720181
+  },
+  "MF/trade": {
+    "scheme": "MF",
+    "signal": "trade",
+    "estimator": "ct-mle",
+    "fit_success": true,
+    "samples": 1222,
+    "spectral_radius": 0.13869929750360405,
+    "reported_spectral_radius": 0.13869929750360405,
+    "stabilized": false,
+    "aligned_norm": 0.06503611257703848,
+    "aligned_sum": 0.15455947726002633
+  },
+  "MTF/trade": {
+    "scheme": "MTF",
+    "signal": "trade",
+    "estimator": "ct-mle",
+    "fit_success": true,
+    "samples": 1224,
+    "spectral_radius": 0.14032881596309194,
+    "reported_spectral_radius": 0.14032881596309194,
+    "stabilized": false,
+    "aligned_norm": 0.0654519672462225,
+    "aligned_sum": 0.15566191932523532
+  }
+}

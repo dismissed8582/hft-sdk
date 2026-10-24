@@ -1,12 +1,14 @@
 #include "hft/Backtest.hpp"
 #include "hft/Disruptor.hpp"
 #include "hft/OBIFilter.hpp"
+#include "hft/Paper.hpp"
 #include "hft/SPSCQueue.hpp"
 #include "hft/ScoringEngine.hpp"
 #include "hft/SignalPipeline.hpp"
 #include "hft/ingest/Binance.hpp"
 #include "hft/ingest/Replay.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -460,6 +462,72 @@ void test_binance_book_depth_parser() {
     std::filesystem::remove(path);
 }
 
+
+
+void test_dependency_barrier() {
+    using namespace hft;
+    using Ring = disruptor::RingBuffer<MarketEvent, 64>;
+    using Consumer = disruptor::ConsumerBarrier<MarketEvent, 64>;
+    Ring ring;
+    Consumer upstream(ring);
+    Consumer downstream(ring);
+    disruptor::ConsumerGroup<MarketEvent, 64> group;
+    group.add(upstream);
+    group.add(downstream);
+    disruptor::GroupProducerBarrier<MarketEvent, 64> producer(ring, group);
+    disruptor::DependencyBarrier<MarketEvent, 64> dependency;
+    dependency.add(upstream);
+    std::atomic<bool> upstream_finished{false};
+    constexpr std::int64_t total = 16;
+    for (std::int64_t sequence = 0; sequence < total; ++sequence) {
+        auto ticket = producer.claim();
+        ticket.entry->order_id = static_cast<std::uint64_t>(sequence + 1);
+        producer.publish(ticket);
+        upstream.wait_for(sequence);
+        CHECK(upstream.get(sequence).order_id ==
+              static_cast<std::uint64_t>(sequence + 1));
+        upstream_finished.store(true, std::memory_order_release);
+        upstream.advance_to(sequence);
+        dependency.wait_for(sequence);
+        CHECK(upstream_finished.load(std::memory_order_acquire));
+        downstream.wait_for(sequence);
+        CHECK(downstream.get(sequence).order_id ==
+              static_cast<std::uint64_t>(sequence + 1));
+        downstream.advance_to(sequence);
+        upstream_finished.store(false, std::memory_order_release);
+    }
+    CHECK(dependency.sequence() == total - 1);
+}
+
+void test_consumer_group() {
+    using namespace hft;
+    using Ring = disruptor::RingBuffer<MarketEvent, 64>;
+    using Consumer = disruptor::ConsumerBarrier<MarketEvent, 64>;
+    Ring ring;
+    Consumer first(ring);
+    Consumer second(ring);
+    disruptor::ConsumerGroup<MarketEvent, 64> group;
+    group.add(first);
+    group.add(second);
+    disruptor::GroupProducerBarrier<MarketEvent, 64> producer(ring, group);
+    constexpr std::int64_t total = 32;
+    for (std::int64_t sequence = 0; sequence < total; ++sequence) {
+        auto ticket = producer.claim();
+        ticket.entry->order_id = static_cast<std::uint64_t>(sequence + 1);
+        producer.publish(ticket);
+        first.wait_for(sequence);
+        second.wait_for(sequence);
+        CHECK(first.get(sequence).order_id == static_cast<std::uint64_t>(sequence + 1));
+        CHECK(second.get(sequence).order_id == static_cast<std::uint64_t>(sequence + 1));
+        first.advance_to(sequence);
+        second.advance_to(sequence);
+    }
+    CHECK(group.size() == 2);
+    CHECK(group.sequence() == total - 1);
+    CHECK(first.sequence() == total - 1);
+    CHECK(second.sequence() == total - 1);
+}
+
 void test_disruptor_mpsc() {
     using namespace hft;
     constexpr std::size_t capacity = 1024;
@@ -532,6 +600,146 @@ void test_disruptor() {
     CHECK(producer.next_sequence() == static_cast<std::int64_t>(total));
 }
 
+
+hft::MarketEvent paper_event(std::uint64_t order_id, std::int64_t timestamp_ns,
+                             hft::EventType type, hft::Side side,
+                             std::int64_t price, std::int64_t quantity = 1) {
+    hft::MarketEvent event{};
+    event.order_id = order_id;
+    event.timestamp_ns = timestamp_ns;
+    event.type = type;
+    event.side = side;
+    event.price_ticks = price;
+    event.quantity = quantity;
+    event.bid_price_ticks = 100;
+    event.ask_price_ticks = 101;
+    return event;
+}
+
+void test_paper_filters() {
+    using namespace hft;
+    constexpr std::int64_t ms = kNanosecondsPerMillisecond;
+    std::vector<MarketEvent> events;
+    // Long-lived, one modification: passes every filter.
+    events.push_back(paper_event(1, 0, EventType::New, Side::Bid, 100));
+    events.push_back(paper_event(1, 50 * ms, EventType::Modify, Side::Bid, 100));
+    events.push_back(paper_event(1, 150 * ms, EventType::Cancel, Side::Bid, 100));
+    // Four fast modifications: fails modification count and modification time.
+    events.push_back(paper_event(2, 0, EventType::New, Side::Bid, 100));
+    for (int index = 1; index <= 4; ++index) {
+        events.push_back(paper_event(2, index * 10 * ms, EventType::Modify,
+                                     Side::Bid, 100));
+    }
+    events.push_back(paper_event(2, 200 * ms, EventType::Cancel, Side::Bid, 100));
+    // Two modifications separated by 60 ms: passes every filter.
+    events.push_back(paper_event(3, 0, EventType::New, Side::Ask, 101));
+    events.push_back(paper_event(3, 60 * ms, EventType::Modify, Side::Ask, 101));
+    events.push_back(paper_event(3, 120 * ms, EventType::Modify, Side::Ask, 101));
+    events.push_back(paper_event(3, 130 * ms, EventType::Cancel, Side::Ask, 101));
+    // Short-lived: fails lifetime only.
+    events.push_back(paper_event(4, 0, EventType::New, Side::Bid, 100));
+    events.push_back(paper_event(4, 10 * ms, EventType::Cancel, Side::Bid, 100));
+    // Four modifications but 60 ms apart: fails modification count only.
+    events.push_back(paper_event(5, 0, EventType::New, Side::Ask, 101));
+    for (int index = 1; index <= 4; ++index) {
+        events.push_back(paper_event(5, index * 60 * ms, EventType::Modify,
+                                     Side::Ask, 101));
+    }
+    events.push_back(paper_event(5, 300 * ms, EventType::Cancel, Side::Ask, 101));
+    // Trade-only ID: should not receive a lifecycle-derived mask.
+    events.push_back(paper_event(99, 10 * ms, EventType::Trade, Side::Buy, 100));
+
+    const obi::FilterThresholds thresholds{100 * ms, 3, 50 * ms};
+    const paper::FilterMaskTable masks = paper::build_filter_masks(events, thresholds);
+    const auto bit = [](obi::FilterScheme scheme) { return obi::scheme_bit(scheme); };
+    const std::uint8_t all = bit(obi::FilterScheme::Unfiltered) |
+                             bit(obi::FilterScheme::Lifetime) |
+                             bit(obi::FilterScheme::ModificationCount) |
+                             bit(obi::FilterScheme::ModificationTime);
+    CHECK(masks.get(1) == all);
+    CHECK(masks.get(2) == (bit(obi::FilterScheme::Unfiltered) |
+                           bit(obi::FilterScheme::Lifetime)));
+    CHECK(masks.get(3) == all);
+    CHECK(masks.get(4) == (bit(obi::FilterScheme::Unfiltered) |
+                           bit(obi::FilterScheme::ModificationCount) |
+                           bit(obi::FilterScheme::ModificationTime)));
+    CHECK(masks.get(5) == (bit(obi::FilterScheme::Unfiltered) |
+                           bit(obi::FilterScheme::Lifetime) |
+                           bit(obi::FilterScheme::ModificationTime)));
+    CHECK(!masks.contains(99));
+    CHECK(masks.get(99) == paper::kAllSchemes);
+}
+
+
+void test_paper_full_execution() {
+    using namespace hft;
+    constexpr std::int64_t ms = kNanosecondsPerMillisecond;
+    std::vector<MarketEvent> events;
+    events.push_back(paper_event(6, 0, EventType::New, Side::Bid, 100, 10));
+    MarketEvent fill = paper_event(9006, 200 * ms, EventType::Trade, Side::Sell, 100, 10);
+    fill.parent_order_id = 6;
+    events.push_back(fill);
+    events.push_back(paper_event(6, 1000 * ms, EventType::Cancel, Side::Bid, 100, 10));
+
+    // Exit is the full fill at 200 ms, not the later cancel at 1000 ms.
+    const obi::FilterThresholds thresholds{500 * ms, 3, 0};
+    const paper::FilterMaskTable masks = paper::build_filter_masks(events, thresholds);
+    CHECK((masks.get(6) & obi::scheme_bit(obi::FilterScheme::Lifetime)) == 0);
+    CHECK((masks.get(6) & obi::scheme_bit(obi::FilterScheme::ModificationCount)) != 0);
+
+    auto tracker = std::make_unique<obi::OrderTracker<(std::size_t{1} << 12)>>();
+    const auto new_observation = tracker->observe(events[0]);
+    CHECK(new_observation.found);
+    CHECK(tracker->active() == 1);
+    const auto trade_observation = tracker->observe(events[1]);
+    CHECK(trade_observation.found);
+    CHECK(tracker->active() == 0);
+}
+
+void test_paper_evaluation() {
+    using namespace hft;
+    constexpr std::int64_t ms = kNanosecondsPerMillisecond;
+    std::vector<MarketEvent> events;
+    events.push_back(paper_event(10, 0, EventType::New, Side::Bid, 100));
+    events.push_back(paper_event(11, 0, EventType::New, Side::Ask, 101));
+    events.push_back(paper_event(12, 200 * ms, EventType::New, Side::Bid, 100));
+    events.push_back(paper_event(13, 300 * ms, EventType::New, Side::Bid, 100));
+    events.push_back(paper_event(14, 400 * ms, EventType::New, Side::Ask, 101));
+    events.push_back(paper_event(10, 1100 * ms, EventType::Trade, Side::Buy, 100));
+    events.push_back(paper_event(11, 1500 * ms, EventType::Trade, Side::Sell, 105));
+    std::stable_sort(events.begin(), events.end(),
+                     [](const MarketEvent& left, const MarketEvent& right) {
+                         return left.timestamp_ns < right.timestamp_ns;
+                     });
+
+    paper::PaperConfig config{};
+    config.obi_window_ns = 5'000 * ms;
+    config.sample_ns = 500 * ms;
+    config.anchor_ns = 1'000 * ms;
+    config.paper_filters = false;
+    const std::vector<paper::PaperTick> ticks =
+        paper::evaluate(events, obi::FilterThresholds{}, config);
+    CHECK(!ticks.empty());
+
+    bool found = false;
+    for (const paper::PaperTick& tick : ticks) {
+        if (tick.timestamp_ns == 1'000 * ms &&
+            tick.scheme == static_cast<std::uint8_t>(obi::FilterScheme::Unfiltered)) {
+            found = true;
+            CHECK(tick.lob_valid);
+            CHECK_NEAR(tick.lob_obi, -0.2, 1e-12);
+            CHECK(tick.forward_valid[0] == 1);
+            CHECK_NEAR(tick.forward_returns[0], 0.05, 1e-12);
+            CHECK(tick.return_regime[0] == 2);
+        }
+    }
+    CHECK(found);
+
+    const std::vector<paper::PaperTick> empty =
+        paper::evaluate(std::span<const MarketEvent>{}, obi::FilterThresholds{}, config);
+    CHECK(empty.empty());
+}
+
 }
 
 int main() {
@@ -549,11 +757,16 @@ int main() {
     test_regime_export();
     test_disruptor();
     test_disruptor_mpsc();
+    test_consumer_group();
+    test_dependency_barrier();
     test_bucketed_counts();
     test_spsc_queue();
     test_binance_trades_parser();
     test_binance_book_depth_parser();
     test_replay_runner();
+    test_paper_filters();
+    test_paper_full_execution();
+    test_paper_evaluation();
 
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";

@@ -155,6 +155,7 @@ public:
         std::int64_t last_modification_ns{0};
         std::int64_t last_modification_interval_ns{std::numeric_limits<std::int64_t>::max()};
         std::uint32_t modifications{0};
+        std::int64_t remaining_quantity{0};
         Side side{Side::None};
         std::uint8_t state{0};
     };
@@ -166,7 +167,11 @@ public:
     };
 
     [[nodiscard]] Observation observe(const MarketEvent& event) noexcept {
-        Record* record = locate(event.order_id);
+        const std::uint64_t lookup_id =
+            event.type == EventType::Trade && event.parent_order_id != 0
+                ? event.parent_order_id
+                : event.order_id;
+        Record* record = locate(lookup_id);
         if (record == nullptr) {
             // A trade is an execution, not a new resting order. A cancel for an
             // order we never saw (or already evicted) must not allocate a
@@ -195,6 +200,7 @@ public:
             record->last_modification_ns = std::numeric_limits<std::int64_t>::min();
             record->last_modification_interval_ns = std::numeric_limits<std::int64_t>::max();
             record->modifications = 0;
+            record->remaining_quantity = event.quantity > 0 ? event.quantity : 0;
         } else if (event.type == EventType::Modify) {
             if (record->last_modification_ns != std::numeric_limits<std::int64_t>::min()) {
                 record->last_modification_interval_ns =
@@ -216,6 +222,15 @@ public:
 
         if (event.type == EventType::Cancel) {
             if (record->state == 1) {
+                record->state = 2;
+                if (active_ != 0) {
+                    --active_;
+                }
+            }
+        } else if (event.type == EventType::Trade &&
+                   record->remaining_quantity > 0) {
+            record->remaining_quantity -= event.quantity;
+            if (record->remaining_quantity <= 0) {
                 record->state = 2;
                 if (active_ != 0) {
                     --active_;
@@ -268,6 +283,7 @@ private:
                 record.last_modification_interval_ns =
                     std::numeric_limits<std::int64_t>::max();
                 record.modifications = 0;
+                record.remaining_quantity = 0;
                 record.side = Side::None;
                 record.state = 1;
                 ++active_;

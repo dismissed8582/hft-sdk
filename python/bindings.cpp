@@ -8,6 +8,7 @@
 #include <cctype>
 #include <cstdint>
 #include <span>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -26,7 +27,8 @@ std::vector<hft::MarketEvent> events_from_arrays(
     const i64_array& bid_price_ticks,
     const i64_array& ask_price_ticks,
     const i64_array& type_codes,
-    const i64_array& side_codes) {
+    const i64_array& side_codes,
+    const i64_array* parent_order_ids = nullptr) {
     const py::ssize_t count = order_id.size();
     if (timestamp_ns.size() != count || price_ticks.size() != count ||
         quantity.size() != count || bid_price_ticks.size() != count ||
@@ -43,6 +45,10 @@ std::vector<hft::MarketEvent> events_from_arrays(
     const auto asks = ask_price_ticks.unchecked<1>();
     const auto types = type_codes.unchecked<1>();
     const auto sides = side_codes.unchecked<1>();
+    if (parent_order_ids != nullptr && parent_order_ids->size() != count) {
+        throw std::runtime_error("parent_order_ids must match event arrays");
+    }
+
 
     std::vector<hft::MarketEvent> events(static_cast<std::size_t>(count));
     for (py::ssize_t index = 0; index < count; ++index) {
@@ -63,6 +69,10 @@ std::vector<hft::MarketEvent> events_from_arrays(
         }
         event.type = static_cast<hft::EventType>(type);
         event.side = static_cast<hft::Side>(side);
+        if (parent_order_ids != nullptr) {
+            event.parent_order_id =
+                static_cast<std::uint64_t>(parent_order_ids->at(index));
+        }
     }
     return events;
 }
@@ -126,6 +136,7 @@ py::dict read_csv(const std::string& path) {
     py::array_t<std::int64_t> ask_price_ticks(count);
     py::array_t<std::int64_t> type_codes(count);
     py::array_t<std::int64_t> side_codes(count);
+    py::array_t<std::int64_t> parent_order_ids(count);
 
     auto ids = order_id.mutable_unchecked<1>();
     auto stamps = timestamp_ns.mutable_unchecked<1>();
@@ -135,6 +146,7 @@ py::dict read_csv(const std::string& path) {
     auto asks = ask_price_ticks.mutable_unchecked<1>();
     auto types = type_codes.mutable_unchecked<1>();
     auto sides = side_codes.mutable_unchecked<1>();
+    auto parents = parent_order_ids.mutable_unchecked<1>();
 
     for (py::ssize_t index = 0; index < count; ++index) {
         const hft::MarketEvent& event = events[static_cast<std::size_t>(index)];
@@ -146,6 +158,7 @@ py::dict read_csv(const std::string& path) {
         asks(index) = event.ask_price_ticks;
         types(index) = static_cast<std::int64_t>(event.type);
         sides(index) = static_cast<std::int64_t>(event.side);
+        parents(index) = static_cast<std::int64_t>(event.parent_order_id);
     }
 
     py::dict result;
@@ -157,6 +170,7 @@ py::dict read_csv(const std::string& path) {
     result["ask_price_ticks"] = ask_price_ticks;
     result["type_codes"] = type_codes;
     result["side_codes"] = side_codes;
+    result["parent_order_ids"] = parent_order_ids;
     return result;
 }
 
@@ -281,7 +295,8 @@ PYBIND11_MODULE(_core, m) {
         .def_readwrite("bid_price_ticks", &hft::MarketEvent::bid_price_ticks)
         .def_readwrite("ask_price_ticks", &hft::MarketEvent::ask_price_ticks)
         .def_readwrite("type", &hft::MarketEvent::type)
-        .def_readwrite("side", &hft::MarketEvent::side);
+        .def_readwrite("side", &hft::MarketEvent::side)
+        .def_readwrite("parent_order_id", &hft::MarketEvent::parent_order_id);
 
     py::class_<hft::signal::SignalSnapshot>(m, "SignalSnapshot")
         .def_readonly("timestamp_ns", &hft::signal::SignalSnapshot::timestamp_ns)
@@ -387,14 +402,21 @@ PYBIND11_MODULE(_core, m) {
                                   const i64_array& bid_price_ticks,
                                   const i64_array& ask_price_ticks,
                                   const i64_array& type_codes,
-                                  const i64_array& side_codes) {
+                                  const i64_array& side_codes,
+                                  py::object parent_order_ids) {
+            std::optional<i64_array> parents;
+            if (!parent_order_ids.is_none()) {
+                parents = py::cast<i64_array>(parent_order_ids);
+            }
             engine.process(events_from_arrays(order_id, timestamp_ns, price_ticks,
                                               quantity, bid_price_ticks,
                                               ask_price_ticks, type_codes,
-                                              side_codes));
+                                              side_codes,
+                                              parents ? &*parents : nullptr));
         }, py::arg("order_id"), py::arg("timestamp_ns"), py::arg("price_ticks"),
            py::arg("quantity"), py::arg("bid_price_ticks"), py::arg("ask_price_ticks"),
-           py::arg("type_codes"), py::arg("side_codes"))
+           py::arg("type_codes"), py::arg("side_codes"),
+           py::arg("parent_order_ids") = py::none())
         .def("process_frame", [](hft::sdk::OBIFilterEngine& engine, py::object frame) {
             const auto numeric = [&](const char* name) {
                 const py::object series = frame.attr("__getitem__")(name);

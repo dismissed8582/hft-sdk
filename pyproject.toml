@@ -21,6 +21,7 @@ dependencies = ["numpy>=1.21", "pyarrow>=14"]
 [project.optional-dependencies]
 pandas = ["pandas>=1.5"]
 analysis = ["pandas>=1.5"]
+live = ["websockets>=12"]
 
 [project.scripts]
 hft-sdk = "hft_sdk.__main__:main"
@@ -37,6 +38,7 @@ HFT_BUILD_TESTS = "OFF"
 HFT_BUILD_BENCHMARKS = "OFF"
 HFT_BUILD_EVALUATOR = "OFF"
 HFT_BUILD_REPLAY = "OFF"
+HFT_BUILD_FEED = "OFF"
 HFT_BUILD_SHARED_SDK = "OFF"
 # Portable wheels; override with
 #   pip install . --config-settings=cmake.define.HFT_ARCH_NATIVE=ON

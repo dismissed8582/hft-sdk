@@ -562,6 +562,7 @@ def _iter_binance_csv(
                 time_index, price_index, quantity_index = 4, 1, 2
                 maker_index, id_index = 5, 0
             time_unit = "auto"
+            parent_index = None
             rows = itertools.chain([first], reader)
         else:
             columns = _lower_columns(first)
@@ -572,6 +573,7 @@ def _iter_binance_csv(
             maker_index = _find(columns, "isbuyermaker", "is_buyer_maker",
                                 "buyer_maker", "m")
             id_index = _find(columns, "trade_id", "id", "agg_trade_id", "a")
+            parent_index = _find(columns, "parent_order_id", "parent_id", "parent")
             if None in (time_index, price_index, quantity_index, maker_index):
                 raise ValueError(f"unsupported Binance trade CSV: {path}")
             time_unit = "ms" if columns.get("timestamp_ms") is not None else "auto"
@@ -589,6 +591,8 @@ def _iter_binance_csv(
             maker = row[maker_index].strip().lower() in {"1", "true", "t"}
             side = SIDE_SELL if maker else SIDE_BUY
             order_id = int(row[id_index]) if id_index is not None else counter
+            if parent_index is not None and row[parent_index]:
+                order_id = int(row[parent_index])
 
             batch["order_id"].append(order_id)
             batch["timestamp_ns"].append(timestamp)
@@ -621,6 +625,8 @@ def _iter_parquet_trades(
     columns = ["timestamp_ms", "price", "quantity", "buyer_maker"]
     if "trade_id" in names:
         columns.append("trade_id")
+    if "parent_order_id" in names:
+        columns.append("parent_order_id")
     if "asset" in names:
         columns.append("asset")
     if "exchange" in names:
@@ -641,8 +647,12 @@ def _iter_parquet_trades(
             price_ticks = int(round(data["price"][index] * price_scale))
             quantity = int(round(data["quantity"][index] * quantity_scale))
             maker = bool(data["buyer_maker"][index])
-            order_id = (int(data["trade_id"][index])
-                        if "trade_id" in data else counter)
+            if "parent_order_id" in data:
+                order_id = int(data["parent_order_id"][index])
+            elif "trade_id" in data:
+                order_id = int(data["trade_id"][index])
+            else:
+                order_id = counter
             batch["order_id"].append(order_id)
             batch["timestamp_ns"].append(
                 int(data["timestamp_ms"][index]) * 1_000_000)
@@ -928,8 +938,8 @@ def to_tick_csv(
             if not wrote_header:
                 writer.writerow([
                     "timestamp_ns", "event_type", "side", "order_id",
-                    "price_ticks", "quantity", "modifications",
-                    "bid_price_ticks", "ask_price_ticks",
+                    "parent_order_id", "price_ticks", "quantity",
+                    "modifications", "bid_price_ticks", "ask_price_ticks",
                 ])
                 wrote_header = True
             rows = np.column_stack([
@@ -937,6 +947,8 @@ def to_tick_csv(
                 type_names[batch["type_codes"]],
                 side_names[batch["side_codes"]],
                 batch["order_id"],
+                batch.get("parent_order_ids",
+                          np.zeros(len(batch["order_id"]), dtype=np.int64)),
                 batch["price_ticks"],
                 batch["quantity"],
                 np.zeros(len(batch["order_id"]), dtype=np.int64),

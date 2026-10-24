@@ -1,0 +1,9 @@
+.git
+build
+build-*
+data
+benchmarks/results
+benchmarks/plots
+*.parquet
+__pycache__
+.venv

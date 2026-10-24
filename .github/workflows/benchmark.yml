@@ -49,6 +49,12 @@ jobs:
       - name: Smoke-test Python bindings
         run: PYTHONPATH=build python3 -c "import hft_sdk; hft_sdk.OBIFilterEngine()"
 
+      - name: Python live-parser tests
+        run: PYTHONPATH=build python3 -m unittest discover -s python/tests -v
+
+      - name: Smoke-test feed runtime
+        run: ./build/hft_feed --replay data/sample_ticks.csv --http-port 0 --replay-speed 1000
+
       - name: Run benchmark and reporting pipeline
         run: ./tools/run_pipeline.sh
 

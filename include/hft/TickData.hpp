@@ -134,9 +134,11 @@ struct ColumnMap {
     std::size_t modifications{6};
     std::size_t bid{7};
     std::size_t ask{8};
+    std::size_t parent_order_id{9};
     bool has_modifications{true};
     bool has_bid{true};
     bool has_ask{true};
+    bool has_parent_order{false};
 };
 
 inline ColumnMap map_header(const std::array<std::string_view, 32>& fields,
@@ -145,6 +147,7 @@ inline ColumnMap map_header(const std::array<std::string_view, 32>& fields,
     map.has_modifications = false;
     map.has_bid = false;
     map.has_ask = false;
+    map.has_parent_order = false;
     bool has_quantity = false;
     bool has_price = false;
     bool has_timestamp = false;
@@ -173,6 +176,11 @@ inline ColumnMap map_header(const std::array<std::string_view, 32>& fields,
         } else if (name == "quantity" || name == "qty" || name == "size") {
             map.quantity = index;
             has_quantity = true;
+        } else if (name == "parent_order_id" || name == "parent_orderid" ||
+                   name == "parent_order" || name == "parent_id" ||
+                   name == "parent") {
+            map.parent_order_id = index;
+            map.has_parent_order = true;
         } else if (name == "modifications" || name == "modification_count" ||
                    name == "mod_count" || name == "mods") {
             map.modifications = index;
@@ -279,6 +287,12 @@ inline std::vector<MarketEvent> load_ticks_csv(const std::string& path) {
         }
         if (map.has_ask && map.ask < count) {
             detail::parse_integer(fields[map.ask], event.ask_price_ticks);
+        }
+        if (map.has_parent_order && map.parent_order_id < count &&
+            !fields[map.parent_order_id].empty()) {
+            event.parent_order_id = 0;
+            detail::parse_integer(fields[map.parent_order_id],
+                                  event.parent_order_id);
         }
         events.push_back(event);
     }

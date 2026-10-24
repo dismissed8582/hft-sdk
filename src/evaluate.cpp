@@ -36,7 +36,7 @@ struct Options {
     std::int64_t sample_interval_ms{250};
     std::int64_t lifetime_ms{100};
     std::uint32_t max_modifications{3};
-    std::int64_t min_modification_interval_ms{2};
+    std::int64_t min_modification_interval_ms{50};
 };
 
 void ensure_parent(const std::string& path) {

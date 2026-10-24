@@ -227,6 +227,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] in {"fetch", "download"}:
         return _fetch_main(arguments[1:])
+    if arguments and arguments[0] == "live":
+        from . import live
+        return live.main(arguments[1:])
     return _run_main(arguments)
 
 

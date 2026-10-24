@@ -65,6 +65,8 @@ ARRAY_KEYS = (
     "side_codes",
 )
 
+OPTIONAL_ARRAY_KEYS = ("parent_order_ids",)
+
 
 def resolve_scheme(name: str | int | FilterScheme) -> FilterScheme:
     """Accept ``"UF"``/``"MTF"``, the enum, or its integer value."""
@@ -183,7 +185,11 @@ def run(
         missing = [key for key in ARRAY_KEYS if key not in arrays]
         if missing:
             raise ValueError(f"event arrays are missing: {', '.join(missing)}")
-        engine.process_arrays(**{key: arrays[key] for key in ARRAY_KEYS})
+        kwargs = {key: arrays[key] for key in ARRAY_KEYS}
+        for key in OPTIONAL_ARRAY_KEYS:
+            if key in arrays:
+                kwargs[key] = arrays[key]
+        engine.process_arrays(**kwargs)
 
     return RunResult(
         engine,
@@ -321,6 +327,7 @@ default_data_dir = data.default_data_dir
 __all__ = [
     "ARRAY_KEYS",
     "HORIZONS",
+    "OPTIONAL_ARRAY_KEYS",
     "BacktestConfig",
     "BacktestSummary",
     "EngineConfig",

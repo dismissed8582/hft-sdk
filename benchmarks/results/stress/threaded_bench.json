@@ -1,0 +1,26 @@
+{
+  "events": 100000,
+  "runs": 2,
+  "queue_mutex": {
+    "total_ns_mean": 10357291.5,
+    "total_ns_median": 11862833,
+    "total_ns_std": 2129157.20802,
+    "per_event_ns_mean": 103.572915,
+    "per_event_ns_median": 118.62833,
+    "per_event_ns_p50": 103.572915,
+    "per_event_ns_p99": 118.3272217,
+    "events_per_second": 9655033.84741,
+    "samples_ns": [8851750, 11862833]
+  },
+  "ring_buffer": {
+    "total_ns_mean": 7770437.5,
+    "total_ns_median": 8252166,
+    "total_ns_std": 681266.978082,
+    "per_event_ns_mean": 77.704375,
+    "per_event_ns_median": 82.52166,
+    "per_event_ns_p50": 77.704375,
+    "per_event_ns_p99": 82.4253143,
+    "events_per_second": 12869288.2479,
+    "samples_ns": [7288709, 8252166]
+  }
+}

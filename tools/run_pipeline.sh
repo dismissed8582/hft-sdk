@@ -27,3 +27,16 @@ python3 tools/generate_synthetic_ticks.py
 HFT_LATENCY_CSV="$RESULTS/latency_samples.csv" "$BUILD_DIR/hft_bench"
 
 python3 benchmarks/plot_results.py
+
+if [[ "${RUN_PAPER:-1}" == "1" ]]; then
+    ./tools/run_paper_pipeline.sh
+fi
+if [[ "${RUN_PAIRS:-1}" == "1" ]]; then
+    ./tools/run_pairs.sh
+fi
+if [[ "${RUN_STRESS:-0}" == "1" ]]; then
+    ./tools/run_stress.sh
+fi
+if [[ "${RUN_LOWLATENCY:-0}" == "1" ]]; then
+    ./tools/run_lowlatency_bench.sh
+fi

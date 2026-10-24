@@ -2,6 +2,7 @@
 
 #include "hft/Types.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -10,6 +11,7 @@
 #include <memory>
 #include <thread>
 #include <type_traits>
+#include <vector>
 #include <utility>
 
 namespace hft::disruptor {
@@ -343,22 +345,96 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// Consumer group
+// ---------------------------------------------------------------------------
+// Producer gating for multiple independent consumers that must all observe an
+// entry before its slot can be reused. This is the fan-out part of the LMAX
+// dependency graph; a consumer can itself depend on a group by waiting on the
+// group's minimum sequence.
+template <typename Entry, std::size_t Capacity,
+          typename WaitStrategy = SpinYieldWaitStrategy<>>
+class alignas(kCacheLine) ConsumerGroup {
+public:
+    using ConsumerType = ConsumerBarrier<Entry, Capacity, WaitStrategy>;
+
+    void add(ConsumerType& consumer) noexcept { consumers_.push_back(&consumer); }
+
+    [[nodiscard]] std::int64_t sequence() const noexcept {
+        if (consumers_.empty()) {
+            return -1;
+        }
+        std::int64_t minimum = std::numeric_limits<std::int64_t>::max();
+        for (const ConsumerType* consumer : consumers_) {
+            minimum = std::min(minimum, consumer->sequence());
+        }
+        return minimum;
+    }
+
+    [[nodiscard]] std::size_t size() const noexcept { return consumers_.size(); }
+
+private:
+    std::vector<ConsumerType*> consumers_;
+};
+
+// ---------------------------------------------------------------------------
+// Dependency barrier
+// ---------------------------------------------------------------------------
+// Downstream consumer gate: waits until every upstream consumer has advanced
+// past a sequence. This is the core of a single-stage LMAX dependency graph;
+// chaining these barriers builds a multi-stage graph.
+template <typename Entry, std::size_t Capacity,
+          typename WaitStrategy = SpinYieldWaitStrategy<>>
+class alignas(kCacheLine) DependencyBarrier {
+public:
+    using ConsumerType = ConsumerBarrier<Entry, Capacity, WaitStrategy>;
+
+    DependencyBarrier() = default;
+
+    void add(ConsumerType& consumer) noexcept { upstream_.push_back(&consumer); }
+
+    [[nodiscard]] std::int64_t sequence() const noexcept {
+        if (upstream_.empty()) {
+            return -1;
+        }
+        std::int64_t minimum = std::numeric_limits<std::int64_t>::max();
+        for (const ConsumerType* consumer : upstream_) {
+            minimum = std::min(minimum, consumer->sequence());
+        }
+        return minimum;
+    }
+
+    [[gnu::always_inline]] std::int64_t wait_for(std::int64_t sequence) const noexcept {
+        if (this->sequence() < sequence) {
+            wait_strategy_.wait([this, sequence]() noexcept {
+                return this->sequence() >= sequence;
+            });
+        }
+        return sequence;
+    }
+
+private:
+    std::vector<ConsumerType*> upstream_;
+    [[no_unique_address]] WaitStrategy wait_strategy_{};
+};
+
+// ---------------------------------------------------------------------------
 // Producer barrier
 // ---------------------------------------------------------------------------
 template <typename Entry, std::size_t Capacity,
           typename WaitStrategy = SpinYieldWaitStrategy<>,
-          typename ClaimStrategy = SingleProducerClaim>
+          typename ClaimStrategy = SingleProducerClaim,
+          typename Gating = ConsumerBarrier<Entry, Capacity, WaitStrategy>>
 class alignas(kCacheLine) ProducerBarrier {
 public:
     using RingBufferType = RingBuffer<Entry, Capacity>;
-    using ConsumerBarrierType = ConsumerBarrier<Entry, Capacity, WaitStrategy>;
+    using ConsumerBarrierType = Gating;
 
     struct Ticket {
         std::int64_t sequence;
         Entry* entry;
     };
 
-    ProducerBarrier(RingBufferType& ring, ConsumerBarrierType& consumer) noexcept
+    ProducerBarrier(RingBufferType& ring, Gating& consumer) noexcept
         : ring_(ring), consumer_(consumer) {}
 
     ProducerBarrier(const ProducerBarrier&) = delete;
@@ -389,7 +465,7 @@ public:
 
 private:
     RingBufferType& ring_;
-    ConsumerBarrierType& consumer_;
+    Gating& consumer_;
     alignas(kCacheLine) ClaimStrategy claim_strategy_{};
     [[no_unique_address]] WaitStrategy wait_strategy_{};
 };
@@ -401,5 +477,12 @@ template <typename Entry, std::size_t Capacity,
           typename WaitStrategy = SpinYieldWaitStrategy<>>
 using MultiProducerBarrier =
     ProducerBarrier<Entry, Capacity, WaitStrategy, MultiProducerClaim>;
+
+// Single-producer barrier gated by a group of consumers.
+template <typename Entry, std::size_t Capacity,
+          typename WaitStrategy = SpinYieldWaitStrategy<>>
+using GroupProducerBarrier =
+    ProducerBarrier<Entry, Capacity, WaitStrategy, SingleProducerClaim,
+                    ConsumerGroup<Entry, Capacity, WaitStrategy>>;
 
 } // namespace hft::disruptor

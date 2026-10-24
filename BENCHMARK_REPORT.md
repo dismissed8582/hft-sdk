@@ -1,6 +1,6 @@
 # Low-Latency LOB Engine: Benchmark & Signal-Quality Report
 
-*Generated 2026-10-24 11:11 UTC*
+*Generated 2026-10-24 15:18 UTC*
 
 ## Abstract
 
@@ -8,9 +8,9 @@ This report evaluates the low-latency transport, count- and volume-weighted OBI 
 
 ## Executive Summary
 
-- At **1,000,000 events**, the lock-free RingBuffer is **2.78x faster per event** than `std::queue` guarded by `std::mutex`.
-- Cache-warm RingBuffer hand-off latency is **2.0 ns p50** and **3.2 ns p99**.
-- SIMD Welford is **1.98x** faster than the scalar accumulator on the benchmark workload.
+- At **1,000,000 events**, the lock-free RingBuffer is **2.06x faster per event** than `std::queue` guarded by `std::mutex`.
+- Cache-warm RingBuffer hand-off latency is **2.6 ns p50** and **7.8 ns p99**.
+- SIMD Welford is **2.03x** faster than the scalar accumulator on the benchmark workload.
 - Strongest in-sample count OBI correlation: **LF** at **30s** (Pearson 0.52081, R2 0.27124).
 - Strongest in-sample volume OBI correlation: **LF** at **30s** (Pearson 0.54889, R2 0.30128).
 - Deterministic backtest: **119** trades, total return **-4.353%**, max drawdown **4.353%**.
@@ -22,12 +22,12 @@ This report evaluates the low-latency transport, count- and volume-weighted OBI 
 
 | Events | std::queue + mutex (ns/event) | RingBuffer (ns/event) | Speedup |
 | --- | --- | --- | --- |
-| 10 | 14.34 | 4.06 | 3.53x |
-| 100 | 10.57 | 3.60 | 2.93x |
-| 1,000 | 9.77 | 3.75 | 2.61x |
-| 10,000 | 10.03 | 3.64 | 2.76x |
-| 100,000 | 9.91 | 3.63 | 2.73x |
-| 1,000,000 | 10.13 | 3.64 | 2.78x |
+| 10 | 29.96 | 8.03 | 3.73x |
+| 100 | 27.61 | 12.47 | 2.21x |
+| 1,000 | 28.75 | 10.90 | 2.64x |
+| 10,000 | 23.75 | 11.81 | 2.01x |
+| 100,000 | 20.58 | 10.26 | 2.01x |
+| 1,000,000 | 18.87 | 9.18 | 2.06x |
 
 The RingBuffer is preallocated and reuses a fixed-capacity ring; the queue baseline performs a locked push and a locked pop for every event. Both paths execute the hand-off on one thread, so this isolates synchronization and allocation overhead rather than multi-core contention.
 
@@ -37,8 +37,8 @@ The RingBuffer is preallocated and reuses a fixed-capacity ring; the queue basel
 
 | Path | p50 (ns) | p90 (ns) | p99 (ns) | Samples |
 | --- | --- | --- | --- | --- |
-| Cache cold | 5.9 | 7.2 | 18.2 | 313 |
-| Cache warm | 2.0 | 2.0 | 3.2 | 313 |
+| Cache cold | 11.7 | 18.2 | 25.9 | 313 |
+| Cache warm | 2.6 | 3.9 | 7.8 | 313 |
 
 Cache-warm measurements run an explicit warm-up pass and prefetch the ring before sampling. Latency is amortised over batches of 64 hand-offs to stay above the monotonic-clock granularity.
 
@@ -51,7 +51,7 @@ Cache-warm measurements run an explicit warm-up pass and prefetch the ring befor
 | UF | 0.06939 | 0.00834 | 0.06553 | 0.00798 | 0.46794 | 0.47493 |
 | LF | 0.37798 | 0.17317 | 0.38970 | 0.18926 | 0.46491 | 0.46040 |
 | MF | 0.37065 | 0.15265 | 0.38425 | 0.16359 | 0.48933 | 0.49861 |
-| MTF | 0.38192 | 0.16352 | 0.38752 | 0.16700 | 0.48932 | 0.49854 |
+| MTF | 0.38175 | 0.16346 | 0.39070 | 0.17009 | 0.48891 | 0.49799 |
 
 Mean absolute Pearson is used for ranking so that the OBI sign convention does not obscure magnitude. R2 is the square of the contemporaneous Pearson correlation. Volume-weighted OBI uses the same event stream with quantities instead of flat counts. Regime cross-correlations are computed on AR(1) residuals.
 
@@ -95,6 +95,12 @@ The 13x13 kernel is fitted in `benchmarks/plot_results.py` from the time-synchro
 | Average holding | 1000.000 ms |
 
 Trade-level PnL is stored in `benchmarks/results/pnl_trades.csv`; the raw net-return vector is also embedded in `pnl_summary.json`.
+
+![Trade-level PnL](benchmarks/plots/pnl_trades.png)
+
+The top panel is the compounded equity curve, the middle panel shows
+each trade's net return after fees, and the bottom panel is the
+running drawdown for the same 119-trade run.
 
 The simulator fills at the first snapshot on or after signal time plus the configured latency, holds for the selected horizon, and applies the fee to both legs. Trades are non-overlapping and use mid-price fills.
 
@@ -156,6 +162,10 @@ Build the compiled SDK with `-DHFT_BUILD_SHARED_SDK=ON` and bindings with `-DHFT
 - `benchmarks/results/layer3_regimes.csv` - Layer-3 tuple export
 - `benchmarks/results/pnl_summary.json` - backtest summary
 - `benchmarks/results/pnl_trades.csv` - trade-level PnL
+- `benchmarks/results/paper/` - paper-faithful ex-post diagnostics
+- `benchmarks/results/pairs/` - cointegration pairs-trading backtest
+- `benchmarks/results/lowlatency/` - threaded transport and microbenchmarks
+- `benchmarks/results/stress/` - stress/edge-case report
 - `benchmarks/plots/*.png` - publication charts
 
 ### Benchmark Environment
@@ -166,11 +176,14 @@ Build the compiled SDK with `-DHFT_BUILD_SHARED_SDK=ON` and bindings with `-DHFT
 | Logical CPUs | 10 |
 | Nominal MHz | 24 |
 | Google Benchmark | v1.9.1 |
-| Benchmark timestamp | 2026-10-24T13:09:42+02:00 |
+| Benchmark timestamp | 2026-10-24T17:04:02+02:00 |
 
 ## Scope and Limitations
 
 - Signal-quality numbers are computed on the deterministic synthetic LOB stream supplied for pipeline validation; they are not a production alpha forecast.
+- This report uses the causal streaming filters. The paper-faithful ex-post
+  filters, realized trade returns, 9x3 regime scores and sum-of-exponentials
+  Hawkes fit are reported separately in `benchmarks/results/paper/PAPER_REPORT.md`.
 - The queue comparison is a single-thread hand-off benchmark. It measures mutex and allocation overhead, not multi-core contention.
 - Latency figures are host- and compiler-dependent. Re-run the pipeline on the target deployment hardware before making capacity decisions.
 - The Hawkes kernel is a discrete-time least-squares estimate, not a continuous-time maximum-likelihood fit. Validate it out of sample.

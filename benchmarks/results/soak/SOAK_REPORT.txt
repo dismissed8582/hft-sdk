@@ -1,0 +1,23 @@
+soak generated 2026-10-24T15:43:16Z
+data=data/sample_ticks.csv iterations=1
+--- iteration 1 ---
+{"ts_ns":1792856596572823000,"level":"info","component":"feed","message":"loading replay data/sample_ticks.csv"}
+{"ts_ns":1792856597181444000,"level":"info","component":"feed","message":"stopped: events=470651 trades=14698 gaps=0 dropped=0"}
+        0.94 real         0.34 user         0.06 sys
+           225165312  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               13909  page reclaims
+                   1  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   7  voluntary context switches
+                1467  involuntary context switches
+          2964625086  instructions retired
+           837842746  cycles elapsed
+           224838136  peak memory footprint

@@ -80,6 +80,9 @@ def parse_args() -> argparse.Namespace:
         "--pnl-summary", type=Path, default=Path("benchmarks/results/pnl_summary.json")
     )
     parser.add_argument(
+        "--pnl-trades", type=Path, default=Path("benchmarks/results/pnl_trades.csv")
+    )
+    parser.add_argument(
         "--regimes-csv", type=Path, default=Path("benchmarks/results/layer3_regimes.csv")
     )
     parser.add_argument("--hawkes-lags", type=int, default=16)
@@ -529,6 +532,61 @@ def plot_hawkes_cross_excitation(args: argparse.Namespace, masked: np.ndarray) -
     plt.close(fig)
 
 
+def plot_pnl(args: argparse.Namespace, pnl: dict | None) -> None:
+    if not args.pnl_trades.exists():
+        return
+    trades = pd.read_csv(args.pnl_trades)
+    if trades.empty or "net_return" not in trades:
+        return
+    apply_dark_theme()
+    returns = trades["net_return"].to_numpy(dtype=float)
+    equity = np.concatenate([[1.0], np.cumprod(1.0 + returns)])
+    drawdown = equity / np.maximum.accumulate(equity) - 1.0
+    trade_index = np.arange(0, returns.size + 1)
+    trade_numbers = trade_index[1:]
+    total_return = equity[-1] - 1.0 if equity.size else 0.0
+    max_drawdown = float(drawdown.min()) if drawdown.size else 0.0
+    win_rate = float(np.mean(returns > 0.0)) if returns.size else 0.0
+    trade_count = int(pnl.get("trade_count", returns.size)) if pnl else returns.size
+
+    fig, axes = plt.subplots(3, 1, figsize=(13, 12), sharex=True,
+                             gridspec_kw={"height_ratios": [2.2, 1.4, 1.2]})
+    axes[0].plot(trade_index, 100.0 * equity, color=ACCENT_WARM, linewidth=2.4)
+    axes[0].axhline(100.0, color=DARK_GRID, linewidth=1.0, linestyle="--")
+    axes[0].set_ylabel("Equity (start = 100)")
+    axes[0].set_title(
+        f"Trade-level PnL: {trade_count} trades, total return {100.0 * total_return:.3f}%, "
+        f"win rate {100.0 * win_rate:.2f}%, max drawdown {100.0 * max_drawdown:.3f}%"
+    )
+    axes[0].annotate(
+        f"{100.0 * equity[-1]:.2f}",
+        xy=(trade_index[-1], 100.0 * equity[-1]),
+        xytext=(6, 0),
+        textcoords="offset points",
+        color=DARK_TEXT,
+        va="center",
+        fontsize=11,
+    )
+
+    colors = [ACCENT_WARM if value > 0.0 else ACCENT_QUEUE for value in returns]
+    axes[1].bar(trade_numbers, 1e4 * returns, color=colors, width=0.85)
+    axes[1].axhline(0.0, color=DARK_GRID, linewidth=1.0)
+    axes[1].set_ylabel("Net return (bps)")
+    axes[1].set_title("Per-trade net return after fees")
+
+    axes[2].fill_between(trade_index, 100.0 * drawdown, 0.0,
+                         color=ACCENT_QUEUE, alpha=0.55)
+    axes[2].plot(trade_index, 100.0 * drawdown, color=ACCENT_QUEUE, linewidth=1.4)
+    axes[2].set_ylabel("Drawdown (%)")
+    axes[2].set_xlabel("Trade number")
+    axes[2].set_title("Cumulative drawdown")
+
+    fig.tight_layout()
+    path = args.plots_dir / "pnl_trades.png"
+    fig.savefig(path, dpi=220, bbox_inches="tight", facecolor=DARK_BACKGROUND)
+    plt.close(fig)
+
+
 def write_hawkes_outputs(args: argparse.Namespace, hawkes: dict) -> None:
     kernel = pd.DataFrame(
         hawkes["kernel"], index=HAWKES_LABELS, columns=HAWKES_LABELS
@@ -932,6 +990,12 @@ def build_report(
                 f"Trade-level PnL is stored in `{pnl.get('trades_file', 'benchmarks/results/pnl_trades.csv')}`; "
                 "the raw net-return vector is also embedded in `pnl_summary.json`.",
                 "",
+                f"![Trade-level PnL]({plot_prefix}/pnl_trades.png)",
+                "",
+                "The top panel is the compounded equity curve, the middle panel shows",
+                "each trade's net return after fees, and the bottom panel is the",
+                "running drawdown for the same 119-trade run.",
+                "",
                 "The simulator fills at the first snapshot on or after signal time plus the "
                 "configured latency, holds for the selected horizon, and applies the fee to both "
                 "legs. Trades are non-overlapping and use mid-price fills.",
@@ -1017,6 +1081,10 @@ def build_report(
             "- `benchmarks/results/layer3_regimes.csv` - Layer-3 tuple export",
             "- `benchmarks/results/pnl_summary.json` - backtest summary",
             "- `benchmarks/results/pnl_trades.csv` - trade-level PnL",
+            "- `benchmarks/results/paper/` - paper-faithful ex-post diagnostics",
+            "- `benchmarks/results/pairs/` - cointegration pairs-trading backtest",
+            "- `benchmarks/results/lowlatency/` - threaded transport and microbenchmarks",
+            "- `benchmarks/results/stress/` - stress/edge-case report",
             f"- `{plot_prefix}/*.png` - publication charts",
             "",
         ]
@@ -1036,6 +1104,9 @@ def build_report(
             "",
             "- Signal-quality numbers are computed on the deterministic synthetic LOB stream "
             "supplied for pipeline validation; they are not a production alpha forecast.",
+            "- This report uses the causal streaming filters. The paper-faithful ex-post",
+            "  filters, realized trade returns, 9x3 regime scores and sum-of-exponentials",
+            "  Hawkes fit are reported separately in `benchmarks/results/paper/PAPER_REPORT.md`.",
             "- The queue comparison is a single-thread hand-off benchmark. It measures mutex and "
             "allocation overhead, not multi-core contention.",
             "- Latency figures are host- and compiler-dependent. Re-run the pipeline on the target "
@@ -1060,6 +1131,7 @@ def main() -> None:
     plot_latency(args, latency, benchmarks)
     plot_queue_vs_ringbuffer(args, benchmarks)
     plot_signal_quality(args, scores)
+    plot_pnl(args, pnl)
     if hawkes is not None:
         plot_hawkes_kernel(args, hawkes["kernel"])
         plot_hawkes_cross_excitation(args, hawkes["masked"])
@@ -1072,6 +1144,7 @@ def main() -> None:
         "latency_distribution.png",
         "queue_vs_ringbuffer.png",
         "signal_quality_heatmap.png",
+        "pnl_trades.png",
     ]
     if hawkes is not None:
         written.extend(["hawkes_kernel.png", "hawkes_cross_excitation.png"])

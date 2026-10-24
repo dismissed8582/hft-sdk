@@ -12,6 +12,8 @@ option(HFT_BUILD_BENCHMARKS "Build Google Benchmark suite" ON)
 option(HFT_BUILD_EVALUATOR "Build CSV signal evaluator" ON)
 option(HFT_ARCH_NATIVE "Optimize for the local CPU (NEON on Apple silicon)" ON)
 option(HFT_BUILD_REPLAY "Build the public-data replay tool" ON)
+option(HFT_BUILD_FEED "Build the production feed runtime" ON)
+option(HFT_BUILD_FUZZERS "Build libFuzzer targets (Clang only)" OFF)
 option(HFT_WITH_ARROW "Enable the optional Apache Arrow/Parquet reader" OFF)
 option(HFT_BUILD_SHARED_SDK "Build the compiled shared SDK library" ON)
 option(HFT_BUILD_PYTHON "Build pybind11 Python bindings" ON)
@@ -109,6 +111,25 @@ if(HFT_BUILD_REPLAY)
     target_link_libraries(hft_replay PRIVATE hft::core Threads::Threads)
 endif()
 
+if(HFT_BUILD_EVALUATOR)
+    add_executable(hft_paper_eval src/paper_eval.cpp)
+    target_link_libraries(hft_paper_eval PRIVATE hft::core)
+endif()
+
+if(HFT_BUILD_FEED AND UNIX)
+    add_executable(hft_feed src/feed_runner.cpp)
+    target_link_libraries(hft_feed PRIVATE hft::core Threads::Threads)
+endif()
+
+if(HFT_BUILD_FUZZERS AND CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(hft_fuzz_csv tests/fuzz_csv.cpp)
+    target_link_libraries(hft_fuzz_csv PRIVATE hft::core)
+    target_compile_options(hft_fuzz_csv PRIVATE
+        -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -g)
+    target_link_options(hft_fuzz_csv PRIVATE
+        -fsanitize=fuzzer,address,undefined)
+endif()
+
 if(HFT_BUILD_BENCHMARKS)
     find_package(benchmark CONFIG QUIET)
     if(NOT benchmark_FOUND)
@@ -129,11 +150,21 @@ if(HFT_BUILD_BENCHMARKS)
         HFT_CANONICAL_BENCH_OUT="${CMAKE_SOURCE_DIR}/benchmarks/results/latest_bench.json"
         HFT_CANONICAL_LATENCY_OUT="${CMAKE_SOURCE_DIR}/benchmarks/results/latency_samples.csv"
     )
+
+    add_executable(hft_microbench src/microbench.cpp)
+    target_link_libraries(hft_microbench PRIVATE hft::core benchmark::benchmark)
+
+    add_executable(hft_threaded_bench src/threaded_bench.cpp)
+    target_link_libraries(hft_threaded_bench PRIVATE hft::core Threads::Threads)
 endif()
 
 set(HFT_INSTALL_TARGETS hft_core)
 if(HFT_BUILD_SHARED_SDK)
     list(APPEND HFT_INSTALL_TARGETS hft_sdk)
+endif()
+
+if(TARGET hft_feed)
+    list(APPEND HFT_INSTALL_TARGETS hft_feed)
 endif()
 
 install(TARGETS ${HFT_INSTALL_TARGETS}
@@ -160,6 +191,10 @@ install(FILES
     ${CMAKE_CURRENT_BINARY_DIR}/HftSdkConfig.cmake
     ${CMAKE_CURRENT_BINARY_DIR}/HftSdkConfigVersion.cmake
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/HftSdk)
+
+configure_file(cmake/hft-sdk.pc.in ${CMAKE_CURRENT_BINARY_DIR}/hft-sdk.pc @ONLY)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/hft-sdk.pc
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 
 if(HFT_BUILD_PYTHON)
     set(PYBIND11_FINDPYTHON ON CACHE BOOL "" FORCE)
@@ -191,6 +226,7 @@ if(HFT_BUILD_PYTHON)
             python/hft_sdk/__init__.py
             python/hft_sdk/__main__.py
             python/hft_sdk/data.py
+            python/hft_sdk/live.py
             DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/hft_sdk")
         # The module installs as <prefix>/lib/pythonX.Y/site-packages/hft_sdk/,
         # while libhft_sdk lives in <prefix>/lib, hence three parent hops.
@@ -214,6 +250,7 @@ if(HFT_BUILD_PYTHON)
             python/hft_sdk/__init__.py
             python/hft_sdk/__main__.py
             python/hft_sdk/data.py
+            python/hft_sdk/live.py
             DESTINATION ${HFT_PYTHON_INSTALL_DIR})
     else()
         message(WARNING "Python development files not found; skipping pybind11 bindings")

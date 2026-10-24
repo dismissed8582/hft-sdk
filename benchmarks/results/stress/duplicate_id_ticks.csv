@@ -1,0 +1,5 @@
+timestamp_ns,scheme,is_anchor,lob_obi,lob_valid,trade_obi,trade_valid,ret_1s,ret_10s,ret_20s,ret_30s,ret_50s,ret_80s,ret_100s,ret_1s_valid,ret_10s_valid,ret_20s_valid,ret_30s_valid,ret_50s_valid,ret_80s_valid,ret_100s_valid,obi_regime,trade_obi_regime,return_regime_1s,return_regime_10s,return_regime_20s
+0,UF,0,-1,1,0,0,,,,,,,,0,0,0,0,0,0,0,0,4,1,1,1
+0,LF,0,0,0,0,0,,,,,,,,0,0,0,0,0,0,0,4,4,1,1,1
+0,MF,0,-1,1,0,0,,,,,,,,0,0,0,0,0,0,0,0,4,1,1,1
+0,MTF,0,0,0,0,0,,,,,,,,0,0,0,0,0,0,0,4,4,1,1,1

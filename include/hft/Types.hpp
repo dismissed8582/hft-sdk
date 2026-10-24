@@ -97,8 +97,11 @@ struct alignas(kCacheLine) MarketEvent {
     std::uint32_t modifications{0};
     EventType type{EventType::New};
     Side side{Side::None};
-    std::uint8_t flags{0};
-    std::uint8_t padding[9]{};
+    // Optional linkage from an execution to the resting parent order. Public
+    // trade feeds usually leave this zero; proprietary/order-level feeds can
+    // populate it to enable the paper's parent-filtered OBI(T).
+    std::uint64_t parent_order_id{0};
+    std::uint8_t padding[2]{};
 };
 
 static_assert(sizeof(MarketEvent) % kCacheLine == 0);

@@ -1,8 +1,8 @@
 {
   "context": {
-    "date": "2026-10-24T13:09:42+02:00",
+    "date": "2026-10-24T17:04:02+02:00",
     "host_name": "MacBook-Air.fritz.box",
-    "executable": "build/hft_bench",
+    "executable": "build-verify/hft_bench",
     "num_cpus": 10,
     "mhz_per_cpu": 24,
     "cpu_scaling_enabled": false,
@@ -26,7 +26,7 @@
         "num_sharing": 1
       }
     ],
-    "load_avg": [5.56445,7.44629,6.31982],
+    "load_avg": [18.4995,8.78711,5.88916],
     "library_version": "v1.9.1",
     "library_build_type": "release",
     "json_schema_version": 1
@@ -41,11 +41,11 @@
       "repetitions": 1,
       "repetition_index": 0,
       "threads": 1,
-      "iterations": 960519,
-      "real_time": 1.4341686629887099e+02,
-      "cpu_time": 1.4297686979643277e+02,
+      "iterations": 515625,
+      "real_time": 2.9956169697371394e+02,
+      "cpu_time": 2.9945018181818136e+02,
       "time_unit": "ns",
-      "items_per_second": 6.9726805905524954e+07
+      "items_per_second": 3.3382104925375301e+07
     },
     {
       "name": "Queue/Mutex/100/min_time:0.100/real_time",
@@ -56,11 +56,11 @@
       "repetitions": 1,
       "repetition_index": 0,
       "threads": 1,
-      "iterations": 131828,
-      "real_time": 1.0573815880281149e+03,
-      "cpu_time": 1.0527202111842728e+03,
+      "iterations": 49607,
+      "real_time": 2.7607268126673225e+03,
+      "cpu_time": 2.7369927631181095e+03,
       "time_unit": "ns",
-      "items_per_second": 9.4573237450150385e+07
+      "items_per_second": 3.6222345340784855e+07
     },
     {
       "name": "Queue/Mutex/1000/min_time:0.100/real_time",
@@ -71,11 +71,11 @@
       "repetitions": 1,
       "repetition_index": 0,
       "threads": 1,
-      "iterations": 13959,
-      "real_time": 9.7730377535818425e+03,
-      "cpu_time": 9.7410272942187639e+03,
+      "iterations": 6580,
+      "real_time": 2.8751925073456485e+04,
+      "cpu_time": 2.4275835866261357e+04,
       "time_unit": "ns",
-      "items_per_second": 1.0232233060119894e+08
+      "items_per_second": 3.4780279840225063e+07
     },
     {
       "name": "Queue/Mutex/10000/min_time:0.100/real_time",
@@ -86,11 +86,11 @@
       "repetitions": 1,
       "repetition_index": 0,
       "threads": 1,
-      "iterations": 1000,
-      "real_time": 1.0031962499488145e+05,
-      "cpu_time": 9.9808000000000116e+04,
+      "iterations": 511,
+      "real_time": 2.3747358120086652e+05,
+      "cpu_time": 2.3608219178082197e+05,
       "time_unit": "ns",
-      "items_per_second": 9.9681393351602182e+07
+      "items_per_second": 4.2109947344170138e+07
     },
     {
       "name": "Queue/Mutex/100000/min_time:0.100/real_time",
@@ -101,11 +101,11 @@
       "repetitions": 1,
       "repetition_index": 0,
       "threads": 1,
-      "iterations": 144,
-      "real_time": 9.9065595835175680e+05,
-      "cpu_time": 9.8693055555555678e+05,
+      "iterations": 66,
+      "real_time": 2.0580612428161795e+06,
+      "cpu_time": 2.0568030303030289e+06,
       "time_unit": "ns",
-      "items_per_second": 1.0094321762963903e+08
+      "items_per_second": 4.8589418973345749e+07
     },
     {
       "name": "Queue/Mutex/1000000/min_time:0.100/real_time",
@@ -116,11 +116,11 @@
       "repetitions": 1,
       "repetition_index": 0,
       "threads": 1,
-      "iterations": 10,
-      "real_time": 1.0126745898742229e+07,
-      "cpu_time": 1.0051799999999966e+07,
+      "iterations": 8,
+      "real_time": 1.8865401125367500e+07,
+      "cpu_time": 1.8838624999999996e+07,
       "time_unit": "ns",
-      "items_per_second": 9.8748404472576216e+07
+      "items_per_second": 5.3007089186953083e+07
     },
     {
       "name": "RingBuffer/Scaled/10/min_time:0.100/real_time",
@@ -131,11 +131,11 @@
       "repetitions": 1,
       "repetition_index": 0,
       "threads": 1,
-      "iterations": 3343520,
-      "real_time": 4.0586106256679685e+01,
-      "cpu_time": 4.0323072689859814e+01,
+      "iterations": 1616728,
+      "real_time": 8.0346332835781155e+01,
+      "cpu_time": 8.0147062461960289e+01,
       "time_unit": "ns",
-      "items_per_second": 2.4638973585583103e+08
+      "items_per_second": 1.2446118754964052e+08
     },
     {
       "name": "RingBuffer/Scaled/100/min_time:0.100/real_time",
@@ -146,11 +146,11 @@
       "repetitions": 1,
       "repetition_index": 0,
       "threads": 1,
-      "iterations": 374377,
-      "real_time": 3.6029724046318694e+02,
-      "cpu_time": 3.5827788566070979e+02,
+      "iterations": 178925,
+      "real_time": 1.2466825037141664e+03,
+      "cpu_time": 1.0540617577197165e+03,
       "time_unit": "ns",
-      "items_per_second": 2.7754861478107101e+08
+      "items_per_second": 8.0212884757808015e+07
     },
     {
       "name": "RingBuffer/Scaled/1000/min_time:0.100/real_time",
@@ -161,11 +161,11 @@
       "repetitions": 1,
       "repetition_index": 0,
       "threads": 1,
-      "iterations": 39285,
-      "real_time": 3.7507753341179114e+03,
-      "cpu_time": 3.6629502354588212e+03,
+      "iterations": 10000,
+      "real_time": 1.0899233401869424e+04,
+      "cpu_time": 1.0032999999999958e+04,
       "time_unit": "ns",
-      "items_per_second": 2.6661154319315556e+08
+      "items_per_second": 9.1749572022971928e+07
     },
     {
       "name": "RingBuffer/Scaled/10000/min_time:0.100/real_time",
@@ -176,11 +176,11 @@
       "repetitions": 1,
       "repetition_index": 0,
       "threads": 1,
-      "iterations": 3837,
-      "real_time": 3.6402767005184527e+04,
-      "cpu_time": 3.6086786551993879e+04,
+      "iterations": 1028,
+      "real_time": 1.1813521399008697e+05,
+      "cpu_time": 1.0635408560311260e+05,
       "time_unit": "ns",
-      "items_per_second": 2.7470439262421423e+08
+      "items_per_second": 8.4648765277042001e+07
     },
     {
       "name": "RingBuffer/Scaled/100000/min_time:0.100/real_time",
@@ -191,11 +191,11 @@
       "repetitions": 1,
       "repetition_index": 0,
       "threads": 1,
-      "iterations": 378,
-      "real_time": 3.6343154763844766e+05,
-      "cpu_time": 3.6107142857142852e+05,
+      "iterations": 139,
+      "real_time": 1.0255200791728797e+06,
+      "cpu_time": 9.8592086330935103e+05,
       "time_unit": "ns",
-      "items_per_second": 2.7515497938963437e+08
+      "items_per_second": 9.7511498829602391e+07
     },
     {
       "name": "RingBuffer/Scaled/1000000/min_time:0.100/real_time",
@@ -206,11 +206,11 @@
       "repetitions": 1,
       "repetition_index": 0,
       "threads": 1,
-      "iterations": 39,
-      "real_time": 3.6377617440078976e+06,
-      "cpu_time": 3.6156153846153831e+06,
+      "iterations": 14,
+      "real_time": 9.1792500004105810e+06,
+      "cpu_time": 9.0987142857142445e+06,
       "time_unit": "ns",
-      "items_per_second": 2.7489430874553418e+08
+      "items_per_second": 1.0894136230686285e+08
     },
     {
       "name": "Disruptor/Throughput/CacheCold/65536/real_time",
@@ -221,11 +221,11 @@
       "repetitions": 1,
       "repetition_index": 0,
       "threads": 1,
-      "iterations": 2972,
-      "real_time": 2.6080638727563035e+05,
-      "cpu_time": 2.5168102288021537e+05,
+      "iterations": 1331,
+      "real_time": 5.7834654394939542e+05,
+      "cpu_time": 5.5567543200601044e+05,
       "time_unit": "ns",
-      "items_per_second": 2.5128218938418484e+08
+      "items_per_second": 1.1331614355723427e+08
     },
     {
       "name": "Disruptor/Throughput/CacheWarmed/65536/real_time",
@@ -236,11 +236,11 @@
       "repetitions": 1,
       "repetition_index": 0,
       "threads": 1,
-      "iterations": 2882,
-      "real_time": 2.4075448160755495e+05,
-      "cpu_time": 2.3988480222067997e+05,
+      "iterations": 1218,
+      "real_time": 6.0778944253231806e+05,
+      "cpu_time": 5.8794991789819347e+05,
       "time_unit": "ns",
-      "items_per_second": 2.7221092443391281e+08
+      "items_per_second": 1.0782681536380133e+08
     },
     {
       "name": "OBI/SIMD/Welford/4096",
@@ -251,11 +251,11 @@
       "repetitions": 1,
       "repetition_index": 0,
       "threads": 1,
-      "iterations": 84624,
-      "real_time": 8.3707941482465612e+03,
-      "cpu_time": 8.1452188504443211e+03,
+      "iterations": 45986,
+      "real_time": 1.5215928935011352e+04,
+      "cpu_time": 1.5208976645065884e+04,
       "time_unit": "ns",
-      "items_per_second": 5.0287169383749133e+08
+      "items_per_second": 2.6931463540177304e+08
     },
     {
       "name": "OBI/Scalar/Welford/4096",
@@ -266,11 +266,11 @@
       "repetitions": 1,
       "repetition_index": 0,
       "threads": 1,
-      "iterations": 42380,
-      "real_time": 1.6592616422907038e+04,
-      "cpu_time": 1.6480698442661644e+04,
+      "iterations": 22626,
+      "real_time": 3.0956270794032582e+04,
+      "cpu_time": 3.0944621232210706e+04,
       "time_unit": "ns",
-      "items_per_second": 2.4853315617966571e+08
+      "items_per_second": 1.3236549154256296e+08
     },
     {
       "name": "Scoring/Regime/LUT/4096",
@@ -281,11 +281,11 @@
       "repetitions": 1,
       "repetition_index": 0,
       "threads": 1,
-      "iterations": 591296,
-      "real_time": 1.1906247040384369e+03,
-      "cpu_time": 1.1854316619764033e+03,
+      "iterations": 314717,
+      "real_time": 2.2260176062471719e+03,
+      "cpu_time": 2.2248400944340524e+03,
       "time_unit": "ns",
-      "items_per_second": 3.4552814231155009e+09
+      "items_per_second": 1.8410311870264668e+09
     },
     {
       "name": "Filter/OrderTracker",
@@ -296,11 +296,11 @@
       "repetitions": 1,
       "repetition_index": 0,
       "threads": 1,
-      "iterations": 60458,
-      "real_time": 1.1501660243165303e+04,
-      "cpu_time": 1.1429041648747880e+04,
+      "iterations": 33780,
+      "real_time": 2.9921901509562224e+04,
+      "cpu_time": 2.7919449378330355e+04,
       "time_unit": "ns",
-      "items_per_second": 3.5838525450195920e+08
+      "items_per_second": 1.4670776434363011e+08
     }
   ]
 }

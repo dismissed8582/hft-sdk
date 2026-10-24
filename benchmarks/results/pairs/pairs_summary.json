@@ -1,0 +1,17 @@
+{
+  "source": "synthetic(points=5000, seed=7)",
+  "hedge_ratio": 2.002072682513198,
+  "intercept": -0.10265712925514729,
+  "spread_mean": 1.566604623803869e-14,
+  "spread_std": 2.0572323873977787,
+  "trades": 116,
+  "total_return": 259.21886976641537,
+  "max_drawdown": -5.6893800921255036,
+  "sharpe_annualized": 1.9862468665832012,
+  "win_rate": 0.9913793103448276,
+  "window": 60,
+  "entry_z": 2.0,
+  "exit_z": 0.5,
+  "fee_bps": 1.0,
+  "adf_pvalue": 1.6530201524460552e-26
+}
