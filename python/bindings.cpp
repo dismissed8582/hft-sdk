@@ -1,4 +1,5 @@
 #include "hft/HftSdk.hpp"
+#include "hft/TickData.hpp"
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -113,6 +114,52 @@ i64_array series_to_i64(py::object frame, const char* primary, const char* fallb
     return result;
 }
 
+py::dict read_csv(const std::string& path) {
+    const std::vector<hft::MarketEvent> events = hft::data::load_ticks_csv(path);
+    const py::ssize_t count = static_cast<py::ssize_t>(events.size());
+
+    py::array_t<std::int64_t> order_id(count);
+    py::array_t<std::int64_t> timestamp_ns(count);
+    py::array_t<std::int64_t> price_ticks(count);
+    py::array_t<std::int64_t> quantity(count);
+    py::array_t<std::int64_t> bid_price_ticks(count);
+    py::array_t<std::int64_t> ask_price_ticks(count);
+    py::array_t<std::int64_t> type_codes(count);
+    py::array_t<std::int64_t> side_codes(count);
+
+    auto ids = order_id.mutable_unchecked<1>();
+    auto stamps = timestamp_ns.mutable_unchecked<1>();
+    auto prices = price_ticks.mutable_unchecked<1>();
+    auto sizes = quantity.mutable_unchecked<1>();
+    auto bids = bid_price_ticks.mutable_unchecked<1>();
+    auto asks = ask_price_ticks.mutable_unchecked<1>();
+    auto types = type_codes.mutable_unchecked<1>();
+    auto sides = side_codes.mutable_unchecked<1>();
+
+    for (py::ssize_t index = 0; index < count; ++index) {
+        const hft::MarketEvent& event = events[static_cast<std::size_t>(index)];
+        ids(index) = static_cast<std::int64_t>(event.order_id);
+        stamps(index) = event.timestamp_ns;
+        prices(index) = event.price_ticks;
+        sizes(index) = event.quantity;
+        bids(index) = event.bid_price_ticks;
+        asks(index) = event.ask_price_ticks;
+        types(index) = static_cast<std::int64_t>(event.type);
+        sides(index) = static_cast<std::int64_t>(event.side);
+    }
+
+    py::dict result;
+    result["order_id"] = order_id;
+    result["timestamp_ns"] = timestamp_ns;
+    result["price_ticks"] = price_ticks;
+    result["quantity"] = quantity;
+    result["bid_price_ticks"] = bid_price_ticks;
+    result["ask_price_ticks"] = ask_price_ticks;
+    result["type_codes"] = type_codes;
+    result["side_codes"] = side_codes;
+    return result;
+}
+
 py::dict metrics_table(const hft::sdk::OBIFilterEngine& engine) {
     const std::vector<hft::signal::SignalMetrics> rows = engine.metrics();
     const py::ssize_t count = static_cast<py::ssize_t>(rows.size());
@@ -176,8 +223,13 @@ py::dict metrics_table(const hft::sdk::OBIFilterEngine& engine) {
 
 } // namespace
 
-PYBIND11_MODULE(hft_sdk, m) {
+PYBIND11_MODULE(_core, m) {
     m.doc() = "C++20 low-latency LOB signal SDK";
+    m.attr("__version__") = HFT_SDK_VERSION;
+
+    m.def("read_csv", &read_csv, py::arg("path"),
+          "Load a tick CSV into a dict of NumPy arrays accepted by "
+          "OBIFilterEngine.process_arrays().");
 
     py::enum_<hft::EventType>(m, "EventType")
         .value("New", hft::EventType::New)

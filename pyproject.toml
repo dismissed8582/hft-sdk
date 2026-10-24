@@ -1,0 +1,44 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.11"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "hft-sdk"
+version = "1.0.0"
+description = "C++20 low-latency limit-order-book signal engine with Python bindings"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Proprietary" }
+authors = [{ name = "HFT SDK authors" }]
+keywords = ["hft", "order-book", "obi", "market-microstructure", "cpp"]
+classifiers = [
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+dependencies = ["numpy>=1.21", "pyarrow>=14"]
+
+[project.optional-dependencies]
+pandas = ["pandas>=1.5"]
+analysis = ["pandas>=1.5"]
+
+[project.scripts]
+hft-sdk = "hft_sdk.__main__:main"
+
+[tool.scikit-build]
+minimum-version = "0.10"
+build-dir = "build/{wheel_tag}"
+# The CMake install step places the compiled extension and the Python files;
+# nothing needs to be copied from the source tree separately.
+wheel.packages = []
+
+[tool.scikit-build.cmake.define]
+HFT_BUILD_TESTS = "OFF"
+HFT_BUILD_BENCHMARKS = "OFF"
+HFT_BUILD_EVALUATOR = "OFF"
+HFT_BUILD_REPLAY = "OFF"
+HFT_BUILD_SHARED_SDK = "OFF"
+# Portable wheels; override with
+#   pip install . --config-settings=cmake.define.HFT_ARCH_NATIVE=ON
+HFT_ARCH_NATIVE = "OFF"
+HFT_PYTHON_INSTALL_DIR = "hft_sdk"

@@ -179,21 +179,42 @@ if(HFT_BUILD_PYTHON)
             target_link_libraries(hft_sdk_py PRIVATE hft_sdk)
         else()
             target_link_libraries(hft_sdk_py PRIVATE hft::core)
+            target_sources(hft_sdk_py PRIVATE src/sdk.cpp src/spsc_queue.cpp)
+            target_compile_definitions(hft_sdk_py PRIVATE HFT_SDK_BUILD)
         endif()
-        set_target_properties(hft_sdk_py PROPERTIES OUTPUT_NAME hft_sdk)
+        target_compile_definitions(hft_sdk_py PRIVATE
+            HFT_SDK_VERSION="${PROJECT_VERSION}")
+        set_target_properties(hft_sdk_py PROPERTIES
+            OUTPUT_NAME "_core"
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/hft_sdk")
+        file(COPY
+            python/hft_sdk/__init__.py
+            python/hft_sdk/__main__.py
+            python/hft_sdk/data.py
+            DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/hft_sdk")
+        # The module installs as <prefix>/lib/pythonX.Y/site-packages/hft_sdk/,
+        # while libhft_sdk lives in <prefix>/lib, hence three parent hops.
         if(APPLE)
-            set_target_properties(hft_sdk_py PROPERTIES INSTALL_RPATH "@loader_path/../..")
+            set_target_properties(hft_sdk_py PROPERTIES INSTALL_RPATH "@loader_path/../../..")
         elseif(UNIX)
-            set_target_properties(hft_sdk_py PROPERTIES INSTALL_RPATH "$ORIGIN/../..")
+            set_target_properties(hft_sdk_py PROPERTIES INSTALL_RPATH "$ORIGIN/../../..")
         endif()
         if(DEFINED PYTHON_VERSION)
             string(REGEX MATCH "^[0-9]+\\.[0-9]+" HFT_PYTHON_XY "${PYTHON_VERSION}")
         else()
             set(HFT_PYTHON_XY "${Python_VERSION_MAJOR}.${Python_VERSION_MINOR}")
         endif()
-        message(STATUS "pybind11 module hft_sdk will install under python${HFT_PYTHON_XY}")
+        set(HFT_PYTHON_INSTALL_DIR
+            "${CMAKE_INSTALL_LIBDIR}/python${HFT_PYTHON_XY}/site-packages/hft_sdk"
+            CACHE STRING "Install directory for the hft_sdk Python package")
+        message(STATUS "pybind11 module hft_sdk._core will install to ${HFT_PYTHON_INSTALL_DIR}")
         install(TARGETS hft_sdk_py
-            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/python${HFT_PYTHON_XY}/site-packages)
+            LIBRARY DESTINATION ${HFT_PYTHON_INSTALL_DIR})
+        install(FILES
+            python/hft_sdk/__init__.py
+            python/hft_sdk/__main__.py
+            python/hft_sdk/data.py
+            DESTINATION ${HFT_PYTHON_INSTALL_DIR})
     else()
         message(WARNING "Python development files not found; skipping pybind11 bindings")
     endif()
