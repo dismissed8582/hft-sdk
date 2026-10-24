@@ -1,0 +1,15 @@
+{
+  "source": "benchmarks/results/real_regimes.csv",
+  "samples": 31970,
+  "lags": 16,
+  "branching_ratio": 0.99,
+  "raw_branching_ratio": 1.0062874030615623,
+  "stabilized": true,
+  "masked_frobenius_norm": 0.03445189478410259,
+  "masked_row_norms": {
+    "RET_0": 0.012182694597320807,
+    "RET_1": 0.00029939458266849855,
+    "RET_2": 0.03222212304797688,
+    "RET_3": 0.00040019461289675677
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "source": "benchmarks/results/layer3_regimes.csv",
+  "samples": 715,
+  "lags": 16,
+  "branching_ratio": 0.99,
+  "raw_branching_ratio": 1.1268261091699192,
+  "stabilized": true,
+  "masked_frobenius_norm": 0.6696096203254204,
+  "masked_row_norms": {
+    "RET_0": 0.30003480252642295,
+    "RET_1": 0.27065808471230246,
+    "RET_2": 0.5285310413127992,
+    "RET_3": 0.0758636965482196
+  }
+}

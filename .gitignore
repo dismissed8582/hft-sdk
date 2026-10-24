@@ -1,0 +1,36 @@
+# Build artifacts
+build/
+build-*/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+*.o
+*.a
+*.dylib
+*.so
+*.so.*
+*.dll
+*.exe
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local market data and downloaded archives
+btc.parquet
+data/*.parquet
+data/*.csv
+data/binance/
+dasdad
+
+# Machine-specific counters
+benchmarks/results/cache_counters.txt
