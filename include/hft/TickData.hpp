@@ -8,6 +8,7 @@
 #include <cctype>
 #include <cstddef>
 #include <fstream>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -215,6 +216,25 @@ inline bool is_header(std::string_view line) {
 
 }
 
+// Some libstdc++ versions allocate stable_sort's temporary storage without
+// honoring MarketEvent's extended alignment. Sort indices, then copy into an
+// aligned vector; use the original index to preserve equal-timestamp order.
+inline void sort_ticks_by_timestamp(std::vector<MarketEvent>& events) {
+    if (std::is_sorted(events.begin(), events.end(), [](const auto& a, const auto& b) {
+            return a.timestamp_ns < b.timestamp_ns;
+        })) return;
+    std::vector<std::size_t> order(events.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        return events[a].timestamp_ns < events[b].timestamp_ns ||
+               (events[a].timestamp_ns == events[b].timestamp_ns && a < b);
+    });
+    std::vector<MarketEvent> sorted;
+    sorted.reserve(events.size());
+    for (const auto index : order) sorted.push_back(events[index]);
+    events.swap(sorted);
+}
+
 inline std::vector<MarketEvent> load_ticks_csv(const std::string& path) {
     std::ifstream input(path);
     if (!input) {
@@ -300,3 +320,4 @@ inline std::vector<MarketEvent> load_ticks_csv(const std::string& path) {
 }
 
 }
+

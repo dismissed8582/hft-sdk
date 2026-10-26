@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
@@ -350,3 +351,4 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
+

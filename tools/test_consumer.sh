@@ -48,21 +48,14 @@ else
     LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$WORK/build/consumer"
 fi
 
-SITE_PACKAGES="$(find "$PREFIX" -type d -name site-packages | head -n 1)"
-PYTHON_BIN="python3"
-if [[ -n "$SITE_PACKAGES" ]]; then
-    MODULE="$(find "$SITE_PACKAGES" -maxdepth 1 -name 'hft_sdk*.so' | head -n 1)"
-    if [[ -n "$MODULE" ]]; then
-        TAG="$(basename "$MODULE" | sed -E 's/.*cpython-([0-9]+).*/\1/')"
-        if [[ -n "$TAG" ]] && command -v "python$TAG" >/dev/null 2>&1; then
-            PYTHON_BIN="python$TAG"
-        fi
-    fi
-    if PYTHONPATH="$SITE_PACKAGES" "$PYTHON_BIN" -c "import hft_sdk; hft_sdk.OBIFilterEngine()" >/dev/null 2>&1; then
-        echo "python module import: ok ($PYTHON_BIN)"
-    else
-        echo "python module import: skipped (interpreter/module mismatch)"
-    fi
+# If this build enabled Python, an installed import failure is a test failure.
+if test "$(sed -n 's/^HFT_BUILD_PYTHON:BOOL=//p' "$BUILD_DIR/CMakeCache.txt")" = "ON"; then
+    SITE_PACKAGES="$(find "$PREFIX" -type d -name site-packages | head -n 1)"
+    test -n "$SITE_PACKAGES"
+    PYTHON_BIN="$(sed -n 's/^_Python_EXECUTABLE:INTERNAL=//p' "$BUILD_DIR/CMakeCache.txt")"
+    PYTHON_BIN="${PYTHON_BIN:-python3}"
+    PYTHONPATH="$SITE_PACKAGES" "$PYTHON_BIN" -c "import hft_sdk; hft_sdk.OBIFilterEngine()"
+    echo "installed Python import: ok ($PYTHON_BIN)"
 fi
 
 echo "find_package(HftSdk) consumer: ok"

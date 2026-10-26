@@ -16,6 +16,10 @@
 #include <chrono>
 #include <csignal>
 #include <cstdint>
+#include <cmath>
+#include <limits>
+#include <poll.h>
+#include <unistd.h>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -159,42 +163,52 @@ struct CliOverrides {
 
 [[nodiscard]] Options merge_options(const CliOverrides& cli) {
     Options options{};
+    config::Config config_file;
     if (cli.config) {
-        config::Config config_file;
         config_file.load(*cli.config);
         options.config = *cli.config;
-        options.replay = config_file.get_string("feed.replay", options.replay);
-        options.stdin_mode = config_file.get_bool("feed.stdin", options.stdin_mode);
-        options.http_address =
-            config_file.get_string("http.address", options.http_address);
-        options.http_port = static_cast<std::uint16_t>(
-            config_file.get_int("http.port", options.http_port));
-        options.sample_ms = config_file.get_int("feed.sample_ms", options.sample_ms);
-        options.lifetime_ms =
-            config_file.get_int("feed.lifetime_ms", options.lifetime_ms);
-        options.max_modifications = static_cast<std::uint32_t>(
-            config_file.get_int("feed.max_modifications",
-                                options.max_modifications));
-        options.mod_time_ms =
-            config_file.get_int("feed.modification_time_ms", options.mod_time_ms);
-        options.stall_ms = config_file.get_int("feed.stall_ms", options.stall_ms);
-        options.replay_speed =
-            config_file.get_double("replay.speed", options.replay_speed);
-        options.log_level = config_file.get_string("log.level", options.log_level);
     }
+    options.replay = config_file.get_string("feed.replay", options.replay);
+    options.stdin_mode = config_file.get_bool("feed.stdin", options.stdin_mode);
+    options.http_address =
+        config_file.get_string("http.address", options.http_address);
+    const auto port = cli.http_port ? *cli.http_port
+        : config_file.get_int("http.port", options.http_port);
+    if (port < 0 || port > 65535) throw std::runtime_error("http.port must be 0..65535");
+    options.http_port = static_cast<std::uint16_t>(port);
+    options.sample_ms = config_file.get_int("feed.sample_ms", options.sample_ms);
+    options.lifetime_ms =
+        config_file.get_int("feed.lifetime_ms", options.lifetime_ms);
+    const auto max_mods = cli.max_modifications ? *cli.max_modifications
+        : config_file.get_int("feed.max_modifications", options.max_modifications);
+    if (max_mods < 0 || max_mods > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::runtime_error("feed.max_modifications is out of range");
+    }
+    options.max_modifications = static_cast<std::uint32_t>(max_mods);
+    options.mod_time_ms =
+        config_file.get_int("feed.modification_time_ms", options.mod_time_ms);
+    options.stall_ms = config_file.get_int("feed.stall_ms", options.stall_ms);
+    options.replay_speed =
+        config_file.get_double("replay.speed", options.replay_speed);
+    options.log_level = config_file.get_string("log.level", options.log_level);
     if (cli.replay) options.replay = *cli.replay;
     if (cli.stdin_mode) options.stdin_mode = *cli.stdin_mode;
     if (cli.http_address) options.http_address = *cli.http_address;
-    if (cli.http_port) options.http_port = static_cast<std::uint16_t>(*cli.http_port);
     if (cli.sample_ms) options.sample_ms = *cli.sample_ms;
     if (cli.lifetime_ms) options.lifetime_ms = *cli.lifetime_ms;
-    if (cli.max_modifications) {
-        options.max_modifications = static_cast<std::uint32_t>(*cli.max_modifications);
-    }
     if (cli.mod_time_ms) options.mod_time_ms = *cli.mod_time_ms;
     if (cli.stall_ms) options.stall_ms = *cli.stall_ms;
     if (cli.replay_speed) options.replay_speed = *cli.replay_speed;
     if (cli.log_level) options.log_level = *cli.log_level;
+    constexpr auto max_ms = std::numeric_limits<std::int64_t>::max() /
+                            hft::kNanosecondsPerMillisecond;
+    if (options.sample_ms <= 0 || options.sample_ms > max_ms ||
+        options.stall_ms <= 0 || options.stall_ms > max_ms ||
+        options.lifetime_ms < 0 || options.lifetime_ms > max_ms ||
+        options.mod_time_ms < 0 || options.mod_time_ms > max_ms ||
+        !std::isfinite(options.replay_speed) || options.replay_speed < 0) {
+        throw std::runtime_error("invalid interval, filter threshold, or replay speed");
+    }
     return options;
 }
 
@@ -242,17 +256,23 @@ struct CliOverrides {
     return true;
 }
 
+[[nodiscard]] std::int64_t steady_now_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 struct Runtime {
     hft::metrics::Registry metrics;
     hft::ingest::FeedStats stats;
     hft::ingest::GapDetector gaps;
     std::atomic<int> state{static_cast<int>(hft::ingest::FeedState::Starting)};
-    std::int64_t started_ns{hft::ingest::now_ns()};
+    std::int64_t started_ns{steady_now_ns()};
+    bool degraded{false};
     std::int64_t stall_ns{5'000'000'000};
 };
 
 [[nodiscard]] std::string health_json(const Runtime& runtime) {
-    const std::int64_t now = hft::ingest::now_ns();
+    const std::int64_t now = steady_now_ns();
     const std::int64_t last = runtime.stats.last_update_ns.load(
         std::memory_order_relaxed);
     const double age = last > 0 ? static_cast<double>(now - last) / 1e9 : -1.0;
@@ -272,12 +292,13 @@ struct Runtime {
 }
 
 void update_state(Runtime& runtime) {
-    const std::int64_t now = hft::ingest::now_ns();
+    const std::int64_t now = steady_now_ns();
     const std::int64_t last = runtime.stats.last_update_ns.load(
         std::memory_order_relaxed);
-    const auto state = last == 0 ? hft::ingest::FeedState::Starting
-        : (now - last > runtime.stall_ns ? hft::ingest::FeedState::Stalled
-                                         : hft::ingest::FeedState::Live);
+    const auto state = last != 0 && now - last > runtime.stall_ns
+        ? hft::ingest::FeedState::Stalled
+        : runtime.degraded ? hft::ingest::FeedState::Degraded
+        : last == 0 ? hft::ingest::FeedState::Starting : hft::ingest::FeedState::Live;
     runtime.state.store(static_cast<int>(state), std::memory_order_relaxed);
 }
 
@@ -332,11 +353,13 @@ public:
         last_timestamp_->set(events.back().timestamp_ns);
         runtime_.stats.messages.fetch_add(events.size(), std::memory_order_relaxed);
         runtime_.stats.trades.fetch_add(trades, std::memory_order_relaxed);
-        runtime_.stats.last_update_ns.store(hft::ingest::now_ns(),
+        runtime_.stats.last_update_ns.store(steady_now_ns(),
                                             std::memory_order_relaxed);
-        update_state(runtime_);
-        state_gauge_->set(static_cast<int>(
-            runtime_.state.load(std::memory_order_relaxed)));
+        const auto dropped = pipeline_->out_of_order_events() + pipeline_->tracker_dropped();
+        runtime_.stats.dropped.store(dropped, std::memory_order_relaxed);
+        if (dropped > 0 || pipeline_->dropped_snapshots() > 0 ||
+            pipeline_->skipped_samples() > 0) runtime_.degraded = true;
+        refresh_health();
     }
 
     void set_state(hft::ingest::FeedState state) {
@@ -344,7 +367,16 @@ public:
         state_gauge_->set(static_cast<int>(state));
     }
 
-    [[nodiscard]] hft::metrics::Counter& parse_errors() { return *parse_errors_; }
+    void refresh_health() {
+        update_state(runtime_);
+        state_gauge_->set(runtime_.state.load(std::memory_order_relaxed));
+    }
+
+    void parse_error() {
+        parse_errors_->increment();
+        runtime_.degraded = true;
+        refresh_health();
+    }
     [[nodiscard]] Runtime& runtime() { return runtime_; }
 
 private:
@@ -362,10 +394,7 @@ private:
 void run_replay(const Options& options, FeedProcessor& processor) {
     logging::info("feed", "loading replay " + options.replay);
     std::vector<hft::MarketEvent> events = hft::data::load_ticks_csv(options.replay);
-    std::stable_sort(events.begin(), events.end(),
-                     [](const hft::MarketEvent& left, const hft::MarketEvent& right) {
-                         return left.timestamp_ns < right.timestamp_ns;
-                     });
+    hft::data::sort_ticks_by_timestamp(events);
     if (events.empty()) {
         throw std::runtime_error("replay file contains no events");
     }
@@ -379,7 +408,12 @@ void run_replay(const Options& options, FeedProcessor& processor) {
                 static_cast<double>(events[end - 1].timestamp_ns - first_timestamp) /
                 options.replay_speed);
             const auto target = wall_start + std::chrono::nanoseconds(target_ns);
-            std::this_thread::sleep_until(target);
+            while (g_running.load() && std::chrono::steady_clock::now() < target) {
+                processor.refresh_health();
+                std::this_thread::sleep_until(std::min(target,
+                    std::chrono::steady_clock::now() + std::chrono::milliseconds(50)));
+            }
+            if (!g_running.load()) break;
         }
         processor.process(std::span<const hft::MarketEvent>(events.data() + index,
                                                             end - index));
@@ -393,14 +427,14 @@ void run_stdin([[maybe_unused]] const Options& options, FeedProcessor& processor
     std::array<std::string_view, 16> fields{};
     std::vector<hft::MarketEvent> batch;
     batch.reserve(4096);
-    while (g_running.load() && std::getline(std::cin, line)) {
+    const auto process_line = [&]() {
         if (line.empty() || line.front() == '#') {
-            continue;
+            return;
         }
         const std::size_t count = hft::ingest::split_fields(line, fields);
         if (count < 8) {
-            processor.parse_errors().increment();
-            continue;
+            processor.parse_error();
+            return;
         }
         hft::MarketEvent event{};
         std::int64_t sequence = 0;
@@ -415,14 +449,20 @@ void run_stdin([[maybe_unused]] const Options& options, FeedProcessor& processor
             hft::ingest::parse_integer(fields[6], event.bid_price_ticks) &&
             hft::ingest::parse_integer(fields[7], event.ask_price_ticks);
         if (!ok) {
-            processor.parse_errors().increment();
-            continue;
+            processor.parse_error();
+            return;
         }
         if (count >= 9 && !fields[8].empty()) {
-            (void)hft::ingest::parse_integer(fields[8], event.parent_order_id);
+            if (!hft::ingest::parse_integer(fields[8], event.parent_order_id)) {
+                processor.parse_error();
+                return;
+            }
         }
-        if (count >= 10 && !fields[9].empty() &&
-            hft::ingest::parse_integer(fields[9], sequence)) {
+        if (count >= 10 && !fields[9].empty()) {
+            if (!hft::ingest::parse_integer(fields[9], sequence) || sequence < 0) {
+                processor.parse_error();
+                return;
+            }
             has_sequence = true;
         }
         if (has_sequence) {
@@ -430,12 +470,58 @@ void run_stdin([[maybe_unused]] const Options& options, FeedProcessor& processor
             if (gap.missing > 0) {
                 processor.runtime().stats.gaps.fetch_add(gap.missing,
                                                           std::memory_order_relaxed);
+                processor.runtime().degraded = true;
+                processor.refresh_health();
                 logging::warn("feed", "sequence gap: " +
                                           std::to_string(gap.missing) + " missing");
             }
         }
         batch.push_back(event);
         if (batch.size() >= 4096) {
+            processor.process(batch);
+            batch.clear();
+        }
+    };
+    // Read chunks rather than getline: poll must also cover partial lines and
+    // idle pipes, so signals and health transitions never wait for a newline.
+    constexpr std::size_t max_line_bytes = 1 << 20;
+    bool discarding = false;
+    char input[8192];
+    while (g_running.load()) {
+        processor.refresh_health();
+        pollfd descriptor{STDIN_FILENO, POLLIN, 0};
+        const int ready = ::poll(&descriptor, 1, 50);
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            throw std::runtime_error("stdin poll failed");
+        }
+        if (ready == 0) continue;
+        if (descriptor.revents & POLLNVAL) throw std::runtime_error("invalid stdin");
+        const ssize_t received = ::read(STDIN_FILENO, input, sizeof(input));
+        if (received < 0) {
+            if (errno == EINTR || errno == EAGAIN) continue;
+            throw std::runtime_error("stdin read failed");
+        }
+        if (received == 0) {
+            if (!line.empty() && !discarding) process_line();
+            break;
+        }
+        for (ssize_t index = 0; index < received; ++index) {
+            if (input[index] == '\n') {
+                if (!discarding) process_line();
+                line.clear();
+                discarding = false;
+            } else if (!discarding) {
+                line.push_back(input[index]);
+                if (line.size() > max_line_bytes) {
+                    processor.parse_error();
+                    line.clear();
+                    discarding = true;
+                }
+            }
+        }
+        // Publish a short batch even if the producer keeps stdin open.
+        if (!batch.empty()) {
             processor.process(batch);
             batch.clear();
         }
@@ -510,3 +596,4 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
+

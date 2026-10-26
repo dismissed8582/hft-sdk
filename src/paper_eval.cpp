@@ -176,11 +176,7 @@ int main(int argc, char** argv) {
                 }
             }
         }
-        std::stable_sort(events.begin(), events.end(),
-                         [](const hft::MarketEvent& left,
-                            const hft::MarketEvent& right) {
-                             return left.timestamp_ns < right.timestamp_ns;
-                         });
+        hft::data::sort_ticks_by_timestamp(events);
 
         const hft::obi::FilterThresholds thresholds{
             options.lifetime_ms * hft::kNanosecondsPerMillisecond,
@@ -239,3 +235,4 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
+

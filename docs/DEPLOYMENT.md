@@ -49,13 +49,28 @@ HFT_HTTP_PORT=9200 hft_feed --config config/hft_feed.conf --stdin
 
 ```bash
 docker build -t hft-sdk:1.0.0 .
-docker run --rm -p 9100:9100 hft-sdk:1.0.0 --config /etc/hft/hft_feed.conf --stdin
+docker run --rm -i -p 127.0.0.1:9100:9100 hft-sdk:1.0.0 --config /etc/hft/hft_feed.conf --stdin
 ```
 
 ### Health semantics
 
 - `starting` — no event processed yet.
 - `live` — event processed within `feed.stall_ms`.
-- `degraded` — a gap, reconnect, or processing error was recorded.
-- `stalled` — no event within `feed.stall_ms`.
-- `stopped` — clean shutdown.
+- `degraded` — a sequence gap, malformed line, or pipeline data loss was recorded;
+  latched until process restart. The native stdin runtime does not reconnect.
+- `stalled` — no processed event within `feed.stall_ms`; takes precedence over
+  degradation after the first event. Fresh input returns to `live` or latched
+  `degraded`. Health and the state gauge refresh at least every 50 ms while idle.
+- `stopped` — clean shutdown (the HTTP server closes during shutdown).
+
+
+Stdin batches flush after each available read, including batches below 4096
+records. A partial line waits for newline or EOF. Lines above 1 MiB are rejected.
+SIGINT/SIGTERM interrupts idle input and replay pacing. HTTP clients have a
+2-second total request/response deadline and cannot hold shutdown open.
+`/health` returns HTTP 200 for a successfully served diagnostic response; inspect
+its JSON `status` for feed readiness. It is not a readiness HTTP status endpoint.
+
+The Docker command keeps stdin open with `-i`. Pipe a producer of normalized
+records into it. EOF and replay completion stop the runtime and its endpoints.
+Published metrics are restricted to the host loopback interface in this example.
