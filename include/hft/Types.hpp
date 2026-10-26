@@ -17,8 +17,7 @@ namespace hft {
 #ifndef HFT_CACHE_LINE
 #if defined(__aarch64__) || defined(__arm64__)
 inline constexpr std::size_t kCacheLine = 128;
-#elif defined(__cpp_lib_hardware_interference_size)
-inline constexpr std::size_t kCacheLine = std::hardware_destructive_interference_size;
+
 #else
 inline constexpr std::size_t kCacheLine = 64;
 #endif
@@ -114,14 +113,16 @@ static_assert(std::is_trivially_copyable_v<MarketEvent>);
 }
 
 [[nodiscard]] constexpr double midpoint_ticks(const MarketEvent& event) noexcept {
-    return 0.5 * static_cast<double>(event.bid_price_ticks + event.ask_price_ticks);
+    return 0.5 * static_cast<double>(event.bid_price_ticks) +
+           0.5 * static_cast<double>(event.ask_price_ticks);
 }
 
 [[nodiscard]] constexpr double midpoint_ticks(std::int64_t bid, std::int64_t ask) noexcept {
-    return 0.5 * static_cast<double>(bid + ask);
+    return 0.5 * static_cast<double>(bid) + 0.5 * static_cast<double>(ask);
 }
 
 inline constexpr std::int64_t kNoTimestamp = std::numeric_limits<std::int64_t>::min();
 inline constexpr std::uint32_t kNoModificationLimit = std::numeric_limits<std::uint32_t>::max();
 
 }
+

@@ -13,11 +13,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import heapq
+import hashlib
+import math
+from contextlib import asynccontextmanager
+from decimal import Decimal, InvalidOperation
 import json
 import threading
 import time
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -39,7 +43,8 @@ SIDE_ASK = 2
 SIDE_BUY = 3
 SIDE_SELL = 4
 
-BINANCE_FUTURES_WS = "wss://fstream.binance.com/stream?streams={symbol}@trade/{symbol}@depth@100ms"
+BINANCE_FUTURES_WS = "wss://fstream.binance.com/public/stream?streams={symbol}@depth@100ms"
+BINANCE_FUTURES_TRADES_WS = "wss://fstream.binance.com/market/stream?streams={symbol}@aggTrade"
 BINANCE_FUTURES_DEPTH = "https://fapi.binance.com/fapi/v1/depth?symbol={symbol}&limit={limit}"
 BYBIT_LINEAR_WS = "wss://stream.bybit.com/v5/public/linear"
 
@@ -58,6 +63,21 @@ class LiveConfig:
     reconnect_max_s: float = 30.0
     snapshot_limit: int = 1000
     engine: EngineConfig | None = None
+    stall_ms: int = 5000
+
+    def __post_init__(self):
+        self.symbol = self.symbol.upper()
+        self.scheme = self.scheme.upper()
+        if self.venue not in {"binance", "bybit"} or not self.symbol.isalnum():
+            raise ValueError("unsupported venue or invalid symbol")
+        if self.scheme not in {"UF", "LF", "MF", "MTF"} or self.horizon not in {1, 10, 30, 50}:
+            raise ValueError("invalid scheme or horizon")
+        if any(not math.isfinite(v) or v <= 0 for v in
+               (self.price_scale, self.quantity_scale, self.reconnect_initial_s, self.reconnect_max_s)):
+            raise ValueError("scales and reconnect intervals must be finite and positive")
+        if (self.flush_interval_ms <= 0 or self.max_batch <= 0 or self.stall_ms <= 0 or
+                not 1 <= self.snapshot_limit <= 1000 or self.reconnect_max_s < self.reconnect_initial_s):
+            raise ValueError("invalid batching, snapshot, or reconnect configuration")
 
 
 class FeedSyncError(RuntimeError):
@@ -79,6 +99,7 @@ class LiveBook:
         self.quantities.clear()
         self.bids.clear()
         self.asks.clear()
+        self.next_id = 1
 
     def _clean(self) -> None:
         while self.bids and (SIDE_BID, -self.bids[0]) not in self.ids:
@@ -88,6 +109,8 @@ class LiveBook:
 
     def update(self, side: int, price_ticks: int,
                quantity: int) -> tuple[int, int, int, int] | None:
+        if side not in {SIDE_BID, SIDE_ASK} or price_ticks <= 0 or quantity < 0:
+            raise ValueError("invalid book level")
         key = (side, price_ticks)
         if quantity > 0:
             if key in self.ids:
@@ -108,21 +131,45 @@ class LiveBook:
             order_id = self.ids.pop(key)
             self.quantities.pop(key, None)
         self._clean()
+        # Lazy-deletion heaps must not grow forever when non-best levels churn.
+        if len(self.bids) + len(self.asks) > 2 * len(self.ids) + 1024:
+            self.bids = [-price for side, price in self.ids if side == SIDE_BID]
+            self.asks = [price for side, price in self.ids if side == SIDE_ASK]
+            heapq.heapify(self.bids)
+            heapq.heapify(self.asks)
         best_bid = -self.bids[0] if self.bids else 0
         best_ask = self.asks[0] if self.asks else 0
         return event_type, order_id, best_bid, best_ask
 
 
 def _timestamp_ns(value: Any) -> int:
-    integer = int(value)
-    magnitude = abs(integer)
-    if magnitude >= 100_000_000_000_000_000:
-        return integer
-    if magnitude >= 100_000_000_000_000:
-        return integer * 1_000
-    if magnitude >= 100_000_000_000:
-        return integer * 1_000_000
-    return integer * 1_000_000_000
+    """Both supported exchange protocols specify milliseconds explicitly."""
+    result = int(value) * 1_000_000
+    if result < 0 or result > np.iinfo(np.int64).max:
+        raise ValueError("exchange timestamp is out of range")
+    return result
+
+
+def _scaled_int(value: Any, scale: float) -> int:
+    try:
+        number = Decimal(str(value)) * Decimal(str(scale))
+        if not number.is_finite() or number < 0:
+            raise ValueError("price/size must be finite and nonnegative")
+        result = int(number.to_integral_value())
+        if result > np.iinfo(np.int64).max:
+            raise ValueError("scaled price/size is out of range")
+        return result
+    except InvalidOperation as error:
+        raise ValueError("invalid price/size") from error
+
+
+def _trade_id(value: Any) -> int:
+    text = str(value)
+    if text.isdecimal() and int(text) <= np.iinfo(np.int64).max:
+        return int(text)
+    # The SDK has integer IDs. UUID/string IDs become deterministic 63-bit
+    # surrogates, never parent-order links; raw recording must retain originals.
+    return int.from_bytes(hashlib.blake2b(text.encode(), digest_size=8).digest(), "big") & ((1 << 63) - 1)
 
 
 class LiveFeed:
@@ -147,6 +194,7 @@ class LiveFeed:
         self._reconnects = 0
         self._dropped = 0
         self._last_message_ns = 0
+        self._last_receipt = 0.0
         self._state = "starting"
         self._last_error = ""
         self._processing_error = False
@@ -164,6 +212,7 @@ class LiveFeed:
     def start(self) -> None:
         if self._thread is not None:
             return
+        self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="hft-live-feed",
                                         daemon=True)
         self._thread.start()
@@ -220,6 +269,21 @@ class LiveFeed:
     async def _stream(self) -> None:
         raise NotImplementedError
 
+    def _reset_epoch(self) -> None:
+        self._set_state("syncing")
+        with self._lock:
+            previous = self.engine.stats()
+            self._dropped += (len(self._arrays["order_id"]) + previous.invalid_events +
+                              previous.out_of_order_events + previous.tracker_dropped)
+            for values in self._arrays.values():
+                values.clear()
+            self.engine = OBIFilterEngine(self.config.engine if self.config.engine is not None else EngineConfig())
+            self._processing_error = False
+            self._last_receipt = 0.0
+        self._book.clear()
+        self._synced = False
+        self._last_update_id = None
+
     # -- event helpers -----------------------------------------------------
     def _append(self, timestamp_ns: int, event_type: int, side: int,
                 order_id: int, price_ticks: int, quantity: int,
@@ -237,8 +301,9 @@ class LiveFeed:
         if event_type == EVENT_TRADE:
             self._trades += 1
         self._last_message_ns = int(timestamp_ns)
+        self._last_receipt = time.monotonic()
         if len(arrays["order_id"]) >= self.config.max_batch:
-            self._flush()
+            self._flush(force=True)
 
     def _flush(self, force: bool = False) -> None:
         if not self._arrays["order_id"]:
@@ -274,21 +339,27 @@ class LiveFeed:
     # -- health ------------------------------------------------------------
     def health(self) -> dict[str, Any]:
         with self._lock:
-            now = time.time_ns()
-            age = ((now - self._last_message_ns) / 1e9
-                   if self._last_message_ns else -1.0)
-            snapshots = len(self.engine.snapshots())
+            age = time.monotonic() - self._last_receipt if self._last_receipt else -1.0
+            stats = self.engine.stats()
+            state = self._state
+            if state == "live" and age > self.config.stall_ms / 1000:
+                state = "stalled"
+            engine_drops = stats.invalid_events + stats.out_of_order_events + stats.tracker_dropped
+            if engine_drops and state == "live":
+                state = "degraded"
+            snapshots = stats.snapshots
             return {
                 "venue": self.config.venue,
                 "symbol": self.config.symbol,
                 "scheme": self.config.scheme,
                 "horizon": self.config.horizon,
-                "state": self._state,
+                "state": state,
                 "messages": self._messages,
                 "trades": self._trades,
                 "gaps": self._gaps,
                 "reconnects": self._reconnects,
-                "dropped": self._dropped,
+                "dropped": self._dropped + engine_drops,
+                "evicted_snapshots": stats.evicted_snapshots,
                 "last_message_age_s": age,
                 "snapshots": snapshots,
                 "last_error": self._last_error,
@@ -296,23 +367,53 @@ class LiveFeed:
 
     def metrics(self) -> dict[str, Any]:
         with self._lock:
-            return self.engine.metrics_table()
+            table = self.engine.metrics_table()
+            selected = (np.asarray(table["scheme"], dtype=str) == self.config.scheme) & (
+                np.asarray(table["horizon_s"]) == self.config.horizon)
+            return {name: np.asarray(values)[selected] for name, values in table.items()}
 
     def snapshot(self):
         with self._lock:
-            snapshots = self.engine.snapshots()
-            return snapshots[-1] if snapshots else None
+            return self.engine.latest_snapshot()
 
 
 class BinancePerpFeed(LiveFeed):
     def __init__(self, config: LiveConfig) -> None:
-        super().__init__(config)
+        super().__init__(replace(config, venue="binance"))
+
+    @asynccontextmanager
+    async def _connection(self):
+        symbol = self.config.symbol.lower()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=10000)
+
+        async def pump(socket):
+            try:
+                while True:
+                    await queue.put(await socket.recv())
+            except Exception as error:
+                await queue.put(error)
+
+        class MergedSocket:
+            async def recv(self):
+                item = await queue.get()
+                if isinstance(item, Exception):
+                    raise item
+                return item
+
+        async with websockets.connect(BINANCE_FUTURES_WS.format(symbol=symbol),
+                                      ping_interval=20, ping_timeout=20, max_queue=1024) as depth, \
+                   websockets.connect(BINANCE_FUTURES_TRADES_WS.format(symbol=symbol),
+                                      ping_interval=20, ping_timeout=20, max_queue=1024) as trades:
+            tasks = [asyncio.create_task(pump(depth)), asyncio.create_task(pump(trades))]
+            try:
+                yield MergedSocket()
+            finally:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _stream(self) -> None:
-        symbol = self.config.symbol.lower()
-        url = BINANCE_FUTURES_WS.format(symbol=symbol)
-        async with websockets.connect(url, ping_interval=20, ping_timeout=20,
-                                      max_queue=1024) as websocket:
+        async with self._connection() as websocket:
             self._set_state("syncing")
             snapshot_task = asyncio.create_task(
                 asyncio.to_thread(self._fetch_snapshot))
@@ -373,16 +474,7 @@ class BinancePerpFeed(LiveFeed):
             return json.loads(response.read())
 
     def _apply_snapshot(self, snapshot: dict[str, Any], timestamp_ns: int) -> None:
-        # A resnapshot starts a new signal epoch: old synthetic order IDs and
-        # rolling counts cannot safely be reconciled with an unrelated snapshot.
-        with self._lock:
-            self._dropped += len(self._arrays["order_id"])
-            for values in self._arrays.values():
-                values.clear()
-            self._processing_error = False
-            self.engine = OBIFilterEngine(
-                self.config.engine if self.config.engine is not None else EngineConfig())
-        self._book.clear()
+        self._reset_epoch()
         self._last_update_id = int(snapshot["lastUpdateId"])
         self._synced = False
         self._pending_snapshot = snapshot
@@ -415,7 +507,7 @@ class BinancePerpFeed(LiveFeed):
                 self._sync_error("Binance snapshot is unavailable")
             for side, key in ((SIDE_BID, "bids"), (SIDE_ASK, "asks")):
                 for price, quantity in snapshot.get(key, []):
-                    self._apply_level(timestamp_ns, side, float(price), float(quantity))
+                    self._apply_level(timestamp_ns, side, price, quantity)
             self._pending_snapshot = None
             self._synced = True
         else:
@@ -426,13 +518,14 @@ class BinancePerpFeed(LiveFeed):
         self._last_update_id = last
         for side, key in ((SIDE_BID, "b"), (SIDE_ASK, "a")):
             for price, quantity in data.get(key, []):
-                self._apply_level(timestamp_ns, side, float(price), float(quantity))
+                self._apply_level(timestamp_ns, side, price, quantity)
+        self._last_receipt = time.monotonic()
         self._set_state("degraded" if self._processing_error else "live")
 
     def _apply_level(self, timestamp_ns: int, side: int, price: float,
                      quantity: float) -> None:
-        price_ticks = int(round(price * self.config.price_scale))
-        quantity_ticks = int(round(quantity * self.config.quantity_scale))
+        price_ticks = _scaled_int(price, self.config.price_scale)
+        quantity_ticks = _scaled_int(quantity, self.config.quantity_scale)
         update = self._book.update(side, price_ticks, quantity_ticks)
         if update is None:
             return
@@ -442,19 +535,19 @@ class BinancePerpFeed(LiveFeed):
 
     def _handle_trade(self, data: dict[str, Any]) -> None:
         timestamp_ns = _timestamp_ns(data.get("T", data.get("E", 0)))
-        price_ticks = int(round(float(data["p"]) * self.config.price_scale))
-        quantity_ticks = int(round(float(data["q"]) * self.config.quantity_scale))
+        price_ticks = _scaled_int(data["p"], self.config.price_scale)
+        quantity_ticks = _scaled_int(data["q"], self.config.quantity_scale)
         side = SIDE_SELL if bool(data.get("m", False)) else SIDE_BUY
         best_bid = -self._book.bids[0] if self._book.bids else 0
         best_ask = self._book.asks[0] if self._book.asks else 0
         self._append(timestamp_ns, EVENT_TRADE, side,
-                     int(data.get("a", data.get("t", 0))),
+                     _trade_id(data.get("a", data.get("t", ""))),
                      price_ticks, quantity_ticks, best_bid, best_ask)
 
 
 class BybitPerpFeed(LiveFeed):
     def __init__(self, config: LiveConfig) -> None:
-        super().__init__(config)
+        super().__init__(replace(config, venue="bybit"))
 
     async def _stream(self) -> None:
         async with websockets.connect(BYBIT_LINEAR_WS, ping_interval=20,
@@ -462,9 +555,10 @@ class BybitPerpFeed(LiveFeed):
             await websocket.send(json.dumps({
                 "op": "subscribe",
                 "args": [f"publicTrade.{self.config.symbol}",
-                         f"orderbook.1.{self.config.symbol}"],
+                         f"orderbook.50.{self.config.symbol}"],
             }))
-            self._set_state("live")
+            self._reset_epoch()
+            self._set_state("syncing")
             while not self._stop.is_set():
                 try:
                     raw = await asyncio.wait_for(websocket.recv(), timeout=1.0)
@@ -472,10 +566,12 @@ class BybitPerpFeed(LiveFeed):
                     self._flush(force=True)
                     continue
                 payload = json.loads(raw)
+                if payload.get("success") is False:
+                    raise FeedSyncError("Bybit subscription rejected: " + str(payload.get("ret_msg", "")))
                 topic = payload.get("topic", "")
-                if topic.startswith("publicTrade."):
+                if topic.startswith("publicTrade.") and self._synced:
                     self._handle_trade(payload.get("data", []))
-                elif topic.startswith("orderbook.1."):
+                elif topic.startswith("orderbook.50."):
                     self._handle_orderbook(payload)
                 self._flush()
 
@@ -484,17 +580,20 @@ class BybitPerpFeed(LiveFeed):
         timestamp_ns = _timestamp_ns(payload.get("ts", data.get("ts", 0)))
         sequence = int(data.get("u", data.get("seq", 0)))
         if payload.get("type") == "snapshot":
-            self._book.clear()
-            self._last_update_id = sequence
-        elif self._last_update_id is not None and sequence > self._last_update_id + 1:
-            self._record_gap(sequence - self._last_update_id - 1)
-        if sequence:
-            self._last_update_id = sequence
+            self._reset_epoch()
+            self._synced = True
+        elif not self._synced or sequence == 1:
+            self._record_gap(1)
+            raise FeedSyncError("Bybit delta requires a fresh snapshot")
+        elif self._last_update_id is not None and sequence <= self._last_update_id:
+            return
+        # Bybit does not specify contiguous update IDs; jumps alone are not
+        # evidence of missing messages. New snapshots replace the whole epoch.
+        self._last_update_id = sequence
         for side, key in ((SIDE_BID, "b"), (SIDE_ASK, "a")):
             for price, quantity in data.get(key, []):
-                price_ticks = int(round(float(price) * self.config.price_scale))
-                quantity_ticks = int(round(float(quantity) *
-                                           self.config.quantity_scale))
+                price_ticks = _scaled_int(price, self.config.price_scale)
+                quantity_ticks = _scaled_int(quantity, self.config.quantity_scale)
                 update = self._book.update(side, price_ticks, quantity_ticks)
                 if update is None:
                     continue
@@ -502,16 +601,18 @@ class BybitPerpFeed(LiveFeed):
                 self._append(timestamp_ns, event_type, side, order_id,
                              price_ticks, quantity_ticks, best_bid, best_ask)
 
+        self._last_receipt = time.monotonic()
+        self._set_state("degraded" if self._processing_error else "live")
+
     def _handle_trade(self, data: list[dict[str, Any]]) -> None:
         for trade in data:
             timestamp_ns = _timestamp_ns(trade.get("T", 0))
-            price_ticks = int(round(float(trade["p"]) * self.config.price_scale))
-            quantity_ticks = int(round(float(trade["v"]) *
-                                       self.config.quantity_scale))
+            price_ticks = _scaled_int(trade["p"], self.config.price_scale)
+            quantity_ticks = _scaled_int(trade["v"], self.config.quantity_scale)
             side = SIDE_BUY if trade.get("S") == "Buy" else SIDE_SELL
             best_bid = -self._book.bids[0] if self._book.bids else 0
             best_ask = self._book.asks[0] if self._book.asks else 0
-            self._append(timestamp_ns, EVENT_TRADE, side, int(trade.get("i", 0)),
+            self._append(timestamp_ns, EVENT_TRADE, side, _trade_id(trade.get("i", "")),
                          price_ticks, quantity_ticks, best_bid, best_ask)
 
 

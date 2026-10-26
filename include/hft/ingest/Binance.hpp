@@ -38,28 +38,21 @@ struct TradeRecord {
 };
 
 [[nodiscard]] inline std::int64_t normalize_timestamp_ns(std::int64_t value) noexcept {
-    if (value > 100'000'000'000'000'000LL) { // ns since epoch
-        return value;
-    }
-    if (value > 100'000'000'000'000LL) { // microseconds
-        return value * 1'000;
-    }
-    if (value > 100'000'000'000LL) { // milliseconds
-        return value * 1'000'000;
-    }
-    return value * 1'000'000'000; // seconds
+    if (value < 0) return -1;
+    const std::int64_t multiplier = value > 100'000'000'000'000'000LL ? 1
+        : value > 100'000'000'000'000LL ? 1'000
+        : value > 100'000'000'000LL ? 1'000'000 : 1'000'000'000;
+    return value > std::numeric_limits<std::int64_t>::max() / multiplier ? -1 : value * multiplier;
 }
 
 [[nodiscard]] inline MarketEvent to_market_event(const TradeRecord& trade,
                                                  double price_scale = 1e8,
-                                                 double quantity_scale = 1e8) noexcept {
+                                                 double quantity_scale = 1e8) {
     MarketEvent event{};
     event.order_id = trade.trade_id;
     event.timestamp_ns = trade.timestamp_ns;
-    event.price_ticks = static_cast<std::int64_t>(
-        std::llround(trade.price * price_scale));
-    event.quantity = static_cast<std::int64_t>(
-        std::llround(trade.quantity * quantity_scale));
+    event.price_ticks = scaled_integer(trade.price, price_scale);
+    event.quantity = scaled_integer(trade.quantity, quantity_scale);
     event.type = EventType::Trade;
     event.side = trade.aggressor;
     return event;
@@ -160,6 +153,9 @@ inline std::uint64_t read_binance_trades_csv(const std::string& path,
                                      std::string(line));
         }
         trade.timestamp_ns = normalize_timestamp_ns(raw_time);
+        if (trade.timestamp_ns < 0 || trade.price <= 0 || trade.quantity < 0) {
+            throw std::runtime_error("invalid Binance timestamp, price, or quantity");
+        }
         trade.buyer_maker = buyer_maker;
         // If the buyer is the maker, the aggressor is the seller.
         trade.aggressor = trade.buyer_maker ? Side::Sell : Side::Buy;
@@ -312,24 +308,21 @@ inline void emit_depth_snapshot_events(const DepthSnapshot& snapshot,
     MarketEvent bid{};
     bid.order_id = ++synthetic_oid;
     bid.timestamp_ns = snapshot.timestamp_ns;
-    bid.price_ticks = static_cast<std::int64_t>(std::llround(mid * 0.99 * price_scale));
-    bid.quantity = static_cast<std::int64_t>(
-        std::llround(snapshot.notional[4] * quantity_scale));
-    bid.bid_price_ticks = static_cast<std::int64_t>(
-        std::llround(mid * 0.99 * price_scale));
-    bid.ask_price_ticks = static_cast<std::int64_t>(
-        std::llround(mid * 1.01 * price_scale));
+    bid.price_ticks = scaled_integer(mid * 0.99, price_scale);
+    bid.quantity = scaled_integer(snapshot.notional[4], quantity_scale);
+    bid.bid_price_ticks = scaled_integer(mid * 0.99, price_scale);
+    bid.ask_price_ticks = scaled_integer(mid * 1.01, price_scale);
     bid.type = EventType::New;
     bid.side = Side::Bid;
     sink(bid);
 
     MarketEvent ask = bid;
     ask.order_id = ++synthetic_oid;
-    ask.price_ticks = static_cast<std::int64_t>(std::llround(mid * 1.01 * price_scale));
-    ask.quantity = static_cast<std::int64_t>(
-        std::llround(snapshot.notional[6] * quantity_scale));
+    ask.price_ticks = scaled_integer(mid * 1.01, price_scale);
+    ask.quantity = scaled_integer(snapshot.notional[6], quantity_scale);
     ask.side = Side::Ask;
     sink(ask);
 }
 
 } // namespace hft::ingest
+

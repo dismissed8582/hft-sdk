@@ -22,6 +22,10 @@ import concurrent.futures
 import datetime as dt
 import hashlib
 import pathlib
+import os
+import re
+import shutil
+import tempfile
 import sys
 import urllib.request
 import zipfile
@@ -64,13 +68,14 @@ def download(url: str, destination: pathlib.Path) -> pathlib.Path:
     if destination.exists():
         return destination
     request = urllib.request.Request(url, headers={"User-Agent": "hft-public-data/1.0"})
-    with urllib.request.urlopen(request, timeout=120) as response, \
-            open(destination, "wb") as output:
-        while True:
-            chunk = response.read(1 << 20)
-            if not chunk:
-                break
-            output.write(chunk)
+    descriptor, name = tempfile.mkstemp(dir=destination.parent, prefix=destination.name + ".")
+    temporary = pathlib.Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as output, urllib.request.urlopen(request, timeout=120) as response:
+            shutil.copyfileobj(response, output)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
     return destination
 
 
@@ -81,10 +86,15 @@ def verify(archive: pathlib.Path, url: str) -> None:
                 checksum_url, headers={"User-Agent": "hft-public-data/1.0"}),
                 timeout=30) as response:
             expected = response.read().decode().split()[0].strip()
-    except Exception:
-        print(f"warning: no checksum for {archive.name}", file=sys.stderr)
-        return
-    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    except Exception as error:
+        raise RuntimeError(f"unable to verify checksum for {archive.name}") from error
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", expected):
+        raise RuntimeError("invalid archive checksum")
+    hasher = hashlib.sha256()
+    with archive.open("rb") as source:
+        for chunk in iter(lambda: source.read(1 << 20), b""):
+            hasher.update(chunk)
+    digest = hasher.hexdigest()
     if digest.lower() != expected.lower():
         raise RuntimeError(f"checksum mismatch for {archive}: {digest} != {expected}")
 
@@ -94,9 +104,19 @@ def fetch_one(url: str, out_dir: pathlib.Path, keep_zip: bool) -> pathlib.Path:
     archive = out_dir / "zips" / name
     download(url, archive)
     verify(archive, url)
-    with zipfile.ZipFile(archive) as zipped:
-        zipped.extractall(out_dir)
     extracted = out_dir / name[:-4]
+    with zipfile.ZipFile(archive) as zipped:
+        members = [item for item in zipped.infolist() if item.filename == extracted.name]
+        if len(members) != 1 or members[0].is_dir():
+            raise RuntimeError("archive does not contain the expected CSV")
+        descriptor, name = tempfile.mkstemp(dir=out_dir, prefix=extracted.name + ".")
+        temporary = pathlib.Path(name)
+        try:
+            with os.fdopen(descriptor, "wb") as output, zipped.open(members[0]) as source:
+                shutil.copyfileobj(source, output)
+            temporary.replace(extracted)
+        finally:
+            temporary.unlink(missing_ok=True)
     if not keep_zip:
         archive.unlink(missing_ok=True)
     return extracted
@@ -144,3 +164,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

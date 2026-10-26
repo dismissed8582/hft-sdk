@@ -1,5 +1,6 @@
 #include "hft/Backtest.hpp"
 #include "hft/Metrics.hpp"
+#include "hft/Logging.hpp"
 #include "hft/TickData.hpp"
 #include "hft/Disruptor.hpp"
 #include "hft/OBIFilter.hpp"
@@ -8,10 +9,14 @@
 #include "hft/ScoringEngine.hpp"
 #include "hft/SignalPipeline.hpp"
 #include "hft/ingest/Binance.hpp"
+#include "hft/ingest/Feed.hpp"
+#include "hft/ingest/Lobster.hpp"
 #include "hft/ingest/Replay.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
+#include <sstream>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -74,6 +79,149 @@ void test_stable_tick_sort() {
     events.clear();
     hft::data::sort_ticks_by_timestamp(events);
     CHECK(events.empty());
+}
+
+template <typename Function>
+bool rejects(Function function) {
+    try { function(); } catch (const std::exception&) { return true; }
+    return false;
+}
+
+void test_retention_and_invalid_input() {
+    using namespace hft;
+    auto pipeline = std::make_unique<signal::SignalPipeline<>>(obi::FilterThresholds{}, 250'000'000, 3);
+    MarketEvent event{};
+    event.type = EventType::New;
+    event.side = Side::Bid;
+    event.quantity = 1;
+    event.price_ticks = event.bid_price_ticks = 100;
+    event.ask_price_ticks = 102;
+    for (int i = 0; i <= 8; ++i) {
+        event.order_id = i + 1;
+        event.timestamp_ns = i * 250'000'000LL;
+        pipeline->process(std::span<const MarketEvent>(&event, 1));
+        if (i >= 3) {
+            CHECK(pipeline->snapshot_count() == 3);
+            CHECK(pipeline->latest_snapshot()->timestamp_ns == event.timestamp_ns);
+            // Exercise history reads interleaved with further ring writes.
+            const auto& history = pipeline->snapshots();
+            CHECK(history.front().timestamp_ns == event.timestamp_ns - 500'000'000);
+            CHECK(history.back().timestamp_ns == event.timestamp_ns);
+        }
+    }
+    CHECK(pipeline->total_snapshots() == 8);
+    CHECK(pipeline->evicted_snapshots() == 5);
+    event.timestamp_ns = -1;
+    pipeline->process(std::span<const MarketEvent>(&event, 1));
+    event.timestamp_ns = std::numeric_limits<std::int64_t>::max();
+    pipeline->process(std::span<const MarketEvent>(&event, 1));
+    CHECK(pipeline->invalid_events() == 2);
+    CHECK(rejects([] { signal::SignalPipeline<> invalid(obi::FilterThresholds{}, 0); }));
+    CHECK_NEAR(midpoint_ticks(std::numeric_limits<std::int64_t>::max(),
+                             std::numeric_limits<std::int64_t>::max()),
+               static_cast<double>(std::numeric_limits<std::int64_t>::max()), 1);
+}
+
+void test_modified_quantity_and_trade_namespace() {
+    using namespace hft;
+    auto tracker = std::make_unique<obi::OrderTracker<64>>();
+    MarketEvent event{};
+    event.order_id = 1; event.side = Side::Bid; event.quantity = 10;
+    (void)tracker->observe(event);
+    event.type = EventType::Modify; event.quantity = 20; event.timestamp_ns = 10;
+    (void)tracker->observe(event);
+    event.type = EventType::Trade; event.side = Side::Sell; event.quantity = 10;
+    event.parent_order_id = 1; event.order_id = 9; event.timestamp_ns = 20;
+    (void)tracker->observe(event);
+    CHECK(tracker->active() == 1);
+    event.parent_order_id = 0; event.order_id = 1;
+    CHECK(!tracker->observe(event).found); // Unlinked trade ID collision.
+    CHECK(tracker->active() == 1);
+    event.parent_order_id = 1; event.order_id = 10; event.timestamp_ns = 30;
+    (void)tracker->observe(event);
+    CHECK(tracker->active() == 0);
+
+    std::vector<MarketEvent> events(4);
+    events[0].order_id = 1; events[0].quantity = 10;
+    events[1] = events[0]; events[1].type = EventType::Modify;
+    events[1].timestamp_ns = 10; events[1].quantity = 20;
+    events[2] = event; events[2].timestamp_ns = 20;
+    events[3] = event; events[3].timestamp_ns = 30;
+    const auto masks = paper::build_filter_masks(events, obi::FilterThresholds{25, 3, 0});
+    CHECK((masks.get(1) & obi::scheme_bit(obi::FilterScheme::Lifetime)) != 0);
+}
+
+void test_parser_and_metric_guards() {
+    using namespace hft;
+    double parsed = 0;
+    CHECK(ingest::parse_double("1234567890123456789", parsed));
+    CHECK_NEAR(parsed, 1234567890123456789.0, 1);
+    CHECK(ingest::parse_double("1.234567890123456789", parsed));
+    CHECK_NEAR(parsed, 1.234567890123456789, 1e-15);
+    CHECK(!ingest::parse_double("NaN", parsed));
+    std::int64_t stamp = 0;
+    CHECK(ingest::parse_utc_ns("2024-02-29T12:34:56.123456789Z", stamp));
+    CHECK(!ingest::parse_utc_ns("2023-02-29T12:34:56", stamp));
+    CHECK(!ingest::parse_utc_ns("9999-01-01T00:00:00", stamp));
+    CHECK(!ingest::parse_utc_ns("2024-01-01T00:00:00garbage", stamp));
+    obi::DirectionalCounts large{};
+    large.bid = std::uint64_t{1} << 33;
+    large.ask = std::uint64_t{1} << 32;
+    CHECK_NEAR(obi::order_book_imbalance(large).value, -1.0 / 3, 1e-12);
+    large.bid = large.ask = std::numeric_limits<std::uint64_t>::max();
+    CHECK(obi::order_book_imbalance(large).valid);
+    CHECK_NEAR(obi::order_book_imbalance(large).value, 0, 1e-12);
+    ingest::GapDetector gaps;
+    CHECK(gaps.check("max", std::numeric_limits<std::uint64_t>::max()).first);
+    CHECK(gaps.check("max", std::numeric_limits<std::uint64_t>::max()).duplicate);
+    CHECK(logging::escape(std::string(1, '\x01')) == "\\u0001");
+    metrics::Registry registry;
+    registry.counter("same");
+    CHECK(rejects([&] { registry.gauge("same"); }));
+    CHECK(rejects([&] { registry.histogram("bad", {100, 10}); }));
+    CHECK(rejects([&] { registry.histogram("bad", {10, 10}); }));
+    std::istringstream numeric("timestamp_ns,event_type,side,order_id,price_ticks,quantity,bid_price_ticks,ask_price_ticks\n0,0,1,1,100,1,100,101\n");
+    CHECK(data::load_ticks_csv(numeric).size() == 1);
+    std::istringstream malformed("timestamp_ns,event_type,side,order_id,price_ticks,quantity,parent_order_id\n0,NEW,BID,1,100,1,bad\n");
+    CHECK(rejects([&] { (void)data::load_ticks_csv(malformed); }));
+    const auto directory = std::filesystem::temp_directory_path() /
+        ("hft_io_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directory(directory);
+    const auto binary = directory / "partial.bin";
+    { std::ofstream output(binary, std::ios::binary); output << "abc"; }
+    CHECK(rejects([&] { ingest::for_each_record<2>(binary.string(), [](const auto&) {}); }));
+#if defined(HFT_WITH_ZLIB)
+    const auto gzip = directory / "long.gz";
+    const std::string line((1 << 20) + 25, 'x');
+    gzFile output = gzopen(gzip.c_str(), "wb");
+    CHECK(output != nullptr);
+    if (output) {
+        CHECK(gzwrite(output, line.data(), static_cast<unsigned>(line.size())) > 0);
+        CHECK(gzclose(output) == Z_OK);
+        std::size_t observed = 0;
+        const auto lines = ingest::for_each_line(gzip.string(), [&](auto value) {
+            observed = value.size();
+        });
+        CHECK(lines == 1 && observed == line.size());
+        std::filesystem::resize_file(gzip, std::filesystem::file_size(gzip) - 8);
+        CHECK(rejects([&] { ingest::for_each_line(gzip.string(), [](auto) {}); }));
+    }
+#endif
+    const auto lobster = directory / "lobster.csv";
+    { std::ofstream lobster_output(lobster); lobster_output <<
+        "1.0,1,42,50,1000000,1\n"
+        "1.1,2,42,10,1000000,1\n"
+        "1.2,4,42,20,1000000,1\n"
+        "1.3,3,42,20,1000000,1\n"
+        "1.4,7,0,0,-1,-1\n"; }
+    std::vector<MarketEvent> messages;
+    CHECK(ingest::read_lobster_messages(lobster.string(), ingest::LobsterOptions{},
+        [&](const auto& event) { messages.push_back(event); }) == 4);
+    CHECK(messages[0].price_ticks == 1000000 && messages[0].side == Side::Bid);
+    CHECK(messages[1].type == EventType::Modify && messages[1].quantity == 40);
+    CHECK(messages[2].type == EventType::Trade && messages[2].side == Side::Sell);
+    CHECK(messages[2].parent_order_id == 42);
+    std::filesystem::remove_all(directory);
 }
 
 void test_types() {
@@ -775,6 +923,9 @@ void test_paper_evaluation() {
 int main() {
     test_histogram_exposition();
     test_stable_tick_sort();
+    test_retention_and_invalid_input();
+    test_modified_quantity_and_trade_namespace();
+    test_parser_and_metric_guards();
     test_types();
     test_obi_math();
     test_weighted_obi();

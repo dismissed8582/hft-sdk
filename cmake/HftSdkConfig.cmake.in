@@ -2,9 +2,16 @@
 
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
-find_dependency(ZLIB)
+if(@ZLIB_FOUND@)
+    find_dependency(ZLIB)
+endif()
 find_dependency(xsimd CONFIG)
+if(@HFT_WITH_ARROW@)
+    find_dependency(Arrow)
+    find_dependency(Parquet)
+endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/HftSdkTargets.cmake")
 
 check_required_components(HftSdk)
+

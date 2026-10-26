@@ -18,6 +18,8 @@ from hft_sdk.live import (
     EVENT_MODIFY,
     EVENT_CANCEL,
     EVENT_TRADE,
+    _scaled_int,
+    _timestamp_ns,
 )
 
 
@@ -137,7 +139,7 @@ class BinanceRecoveryTests(unittest.IsolatedAsyncioTestCase):
             {"lastUpdateId": 100, "bids": [["100", "1"]], "asks": []},
             {"lastUpdateId": 200, "bids": [["99", "2"]], "asks": []},
         ]
-        with patch("hft_sdk.live.websockets.connect", side_effect=[Socket(x) for x in sessions]), \
+        with patch.object(feed, "_connection", side_effect=[Socket(x) for x in sessions]), \
              patch.object(feed, "_fetch_snapshot", side_effect=snapshots) as fetch:
             await asyncio.wait_for(feed._main(), timeout=5)
         self.assertEqual(fetch.call_count, 2)
@@ -199,6 +201,92 @@ class BybitAdapterTests(unittest.TestCase):
         self.assertEqual(feed._arrays["order_id"][0], 7)
 
 
+
+
+
+
+class AdapterEdgeTests(unittest.TestCase):
+    def test_uuid_trade_and_exact_decimal_scaling(self):
+        feed = BybitPerpFeed(LiveConfig())
+        trade = {"T": 1700000000000, "p": "0.00000029", "v": "0.00000003",
+                 "S": "Sell", "i": "20f43950-d8dd-5b31-9112-a178eb6023af"}
+        feed._handle_trade([trade])
+        self.assertGreaterEqual(feed._arrays['order_id'][0], 0)
+        self.assertEqual(feed.health()['venue'], 'bybit')
+        self.assertEqual(_scaled_int('0.00000029', 1e8), 29)
+        self.assertEqual(_timestamp_ns(1000), 1_000_000_000)
+        for value in ('NaN', 'Infinity', '-1', '1e100'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                _scaled_int(value, 100)
+
+    def test_bybit_sequence_jumps_are_not_assumed_loss(self):
+        feed = BybitPerpFeed(LiveConfig())
+        feed._handle_orderbook({'type': 'snapshot', 'ts': 1700000000000,
+                                'data': {'u': 10, 'b': [['100', '1']], 'a': []}})
+        feed._handle_orderbook({'type': 'delta', 'ts': 1700000000100,
+                                'data': {'u': 20, 'b': [['100', '2']], 'a': []}})
+        self.assertEqual(feed.health()['gaps'], 0)
+        self.assertEqual(feed._arrays['type_codes'][-1], EVENT_MODIFY)
+        feed._handle_orderbook({'type': 'delta', 'ts': 1700000000050,
+                                'data': {'u': 19, 'b': [['100', '9']], 'a': []}})
+        self.assertEqual(feed._book.quantities[(SIDE_BID, 10000)], 200000000)
+        previous = feed.engine
+        feed._handle_orderbook({'type': 'snapshot', 'ts': 1700000000200,
+                                'data': {'u': 1, 'b': [['99', '1']], 'a': []}})
+        self.assertIsNot(feed.engine, previous)
+        self.assertNotIn((SIDE_BID, 10000), feed._book.ids)
+
+    def test_batch_limit_forces_flush(self):
+        feed = BinancePerpFeed(LiveConfig(max_batch=2, flush_interval_ms=100000))
+        feed._append(1_000_000_000, EVENT_NEW, SIDE_BID, 1, 100, 1, 100, 101)
+        feed._append(1_250_000_000, EVENT_NEW, SIDE_ASK, 2, 101, 1, 100, 101)
+        self.assertEqual(feed._arrays['order_id'], [])
+        self.assertEqual(feed.engine.stats().processed_events, 2)
+
+    def test_stale_health_uses_receipt_time(self):
+        import time
+        feed = BinancePerpFeed(LiveConfig(stall_ms=10))
+        feed._set_state('live')
+        feed._last_receipt = time.monotonic() - 1
+        self.assertEqual(feed.health()['state'], 'stalled')
+
+    def test_heap_churn_is_bounded(self):
+        book = LiveBook()
+        book.update(SIDE_BID, 100, 1)
+        for _ in range(3000):
+            book.update(SIDE_BID, 99, 1)
+            book.update(SIDE_BID, 99, 0)
+        self.assertLess(len(book.bids), 1100)
+
+
+class BinanceConnectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_public_and_market_routes_and_task_cleanup(self):
+        feed = BinancePerpFeed(LiveConfig())
+
+        class Socket:
+            def __init__(self, payload):
+                self.payload = payload
+                self.received = False
+                self.closed = False
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *args):
+                self.closed = True
+            async def recv(self):
+                if not self.received:
+                    self.received = True
+                    return self.payload
+                await asyncio.Future()
+
+        depth, trades = Socket('depth'), Socket('trades')
+        with patch('hft_sdk.live.websockets.connect', side_effect=[depth, trades]) as connect:
+            async with feed._connection() as merged:
+                received = {await asyncio.wait_for(merged.recv(), 1),
+                            await asyncio.wait_for(merged.recv(), 1)}
+                self.assertEqual(received, {'depth', 'trades'})
+            self.assertIn('/public/', connect.call_args_list[0].args[0])
+            self.assertIn('/market/', connect.call_args_list[1].args[0])
+        self.assertTrue(depth.closed and trades.closed)
+
 if __name__ == "__main__":
     unittest.main()
-

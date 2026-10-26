@@ -4,6 +4,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cmath>
+#include <stdexcept>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -54,15 +56,15 @@ public:
         const std::lock_guard<std::mutex> lock(mutex_);
         const auto iterator = expected_.find(stream);
         if (iterator == expected_.end()) {
-            expected_.emplace(stream, sequence + 1);
+            expected_.emplace(stream, sequence);
             return Result{0, false, true};
         }
-        const std::uint64_t expected = iterator->second;
-        if (sequence < expected) {
+        const std::uint64_t previous = iterator->second;
+        if (sequence <= previous) {
             return Result{0, true, false};
         }
-        const std::uint64_t missing = sequence - expected;
-        iterator->second = sequence + 1;
+        const std::uint64_t missing = sequence - previous - 1;
+        iterator->second = sequence;
         return Result{missing, false, false};
     }
 
@@ -82,13 +84,17 @@ public:
                     std::chrono::milliseconds maximum = std::chrono::milliseconds(30'000),
                     double multiplier = 2.0)
         : initial_(initial), maximum_(maximum), multiplier_(multiplier),
-          current_(initial) {}
+          current_(initial) {
+        if (initial.count() <= 0 || maximum < initial || !std::isfinite(multiplier) || multiplier < 1) {
+            throw std::invalid_argument("invalid reconnect policy");
+        }
+    }
 
     [[nodiscard]] std::chrono::milliseconds next() {
         const auto value = current_;
-        const auto next_value = std::chrono::milliseconds(
-            static_cast<std::int64_t>(current_.count() * multiplier_));
-        current_ = std::min(next_value, maximum_);
+        const double next = static_cast<double>(current_.count()) * multiplier_;
+        current_ = next >= static_cast<double>(maximum_.count()) ? maximum_
+            : std::chrono::milliseconds(static_cast<std::int64_t>(next));
         return value;
     }
 
@@ -108,3 +114,4 @@ private:
 }
 
 } // namespace hft::ingest
+

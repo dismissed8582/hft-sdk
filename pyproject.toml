@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "hft-sdk"
-version = "1.0.0"
+version = "1.0.1"
 description = "C++20 low-latency limit-order-book signal engine with Python bindings"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -20,7 +20,7 @@ dependencies = ["numpy>=1.21", "pyarrow>=14"]
 
 [project.optional-dependencies]
 pandas = ["pandas>=1.5"]
-analysis = ["pandas>=1.5"]
+analysis = ["pandas>=1.5", "scipy>=1.11", "statsmodels>=0.14", "matplotlib>=3.8", "seaborn>=0.13"]
 live = ["websockets>=12"]
 
 [project.scripts]
@@ -44,3 +44,4 @@ HFT_BUILD_SHARED_SDK = "OFF"
 #   pip install . --config-settings=cmake.define.HFT_ARCH_NATIVE=ON
 HFT_ARCH_NATIVE = "OFF"
 HFT_PYTHON_INSTALL_DIR = "hft_sdk"
+

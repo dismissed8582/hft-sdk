@@ -52,6 +52,7 @@ struct Options {
     std::uint32_t max_modifications{3};
     std::int64_t mod_time_ms{50};
     std::int64_t stall_ms{5'000};
+    std::size_t max_snapshots{std::size_t{1} << 19};
     double replay_speed{0.0};
     std::string log_level{"info"};
 };
@@ -67,6 +68,7 @@ struct CliOverrides {
     std::optional<std::int64_t> max_modifications;
     std::optional<std::int64_t> mod_time_ms;
     std::optional<std::int64_t> stall_ms;
+    std::optional<std::int64_t> max_snapshots;
     std::optional<double> replay_speed;
     std::optional<std::string> log_level;
 };
@@ -115,6 +117,7 @@ struct CliOverrides {
                 << "  --lifetime-ms N        lifetime filter threshold\n"
                 << "  --max-mods N           modification-count threshold\n"
                 << "  --mod-time-ms N        modification-time threshold\n"
+                << "  --max-snapshots N     retained history limit; 0 = unbounded\n"
                 << "  --stall-ms N           health stall threshold\n"
                 << "  --replay-speed X       0 = as fast as possible\n"
                 << "  --log-level LEVEL      trace|debug|info|warn|error|off\n"
@@ -148,6 +151,8 @@ struct CliOverrides {
             overrides.max_modifications = parse_i64(value, "max-mods");
         } else if (argument == "--mod-time-ms") {
             overrides.mod_time_ms = parse_i64(value, "mod-time-ms");
+        } else if (argument == "--max-snapshots") {
+            overrides.max_snapshots = parse_i64(value, "max-snapshots");
         } else if (argument == "--stall-ms") {
             overrides.stall_ms = parse_i64(value, "stall-ms");
         } else if (argument == "--replay-speed") {
@@ -188,6 +193,12 @@ struct CliOverrides {
     options.mod_time_ms =
         config_file.get_int("feed.modification_time_ms", options.mod_time_ms);
     options.stall_ms = config_file.get_int("feed.stall_ms", options.stall_ms);
+    const auto retention = cli.max_snapshots ? *cli.max_snapshots
+        : config_file.get_int("feed.max_snapshots", static_cast<std::int64_t>(options.max_snapshots));
+    if (retention < 0 || static_cast<std::uint64_t>(retention) > std::numeric_limits<std::size_t>::max()) {
+        throw std::runtime_error("invalid snapshot retention limit");
+    }
+    options.max_snapshots = static_cast<std::size_t>(retention);
     options.replay_speed =
         config_file.get_double("replay.speed", options.replay_speed);
     options.log_level = config_file.get_string("log.level", options.log_level);
@@ -268,6 +279,7 @@ struct Runtime {
     std::atomic<int> state{static_cast<int>(hft::ingest::FeedState::Starting)};
     std::int64_t started_ns{steady_now_ns()};
     bool degraded{false};
+    std::uint64_t duplicate_drops{0};
     std::int64_t stall_ns{5'000'000'000};
 };
 
@@ -311,7 +323,7 @@ public:
                   options.lifetime_ms * hft::kNanosecondsPerMillisecond,
                   options.max_modifications,
                   options.mod_time_ms * hft::kNanosecondsPerMillisecond},
-              options.sample_ms * hft::kNanosecondsPerMillisecond)) {
+              options.sample_ms * hft::kNanosecondsPerMillisecond, options.max_snapshots)) {
         events_total_ = &runtime_.metrics.counter(
             "hft_events_total", "Normalized market events processed");
         trades_total_ = &runtime_.metrics.counter(
@@ -324,6 +336,8 @@ public:
             "hft_last_event_timestamp_ns", "Last event timestamp in nanoseconds");
         state_gauge_ = &runtime_.metrics.gauge(
             "hft_feed_state", "0=starting,1=live,2=degraded,3=stalled,4=stopped");
+        evictions_total_ = &runtime_.metrics.counter(
+            "hft_snapshot_evictions_total", "Oldest historical samples evicted from bounded retention");
         process_latency_ = &runtime_.metrics.histogram(
             "hft_batch_latency_ns", {1e3, 1e4, 1e5, 1e6, 1e7},
             "Batch processing latency in nanoseconds");
@@ -334,31 +348,31 @@ public:
             return;
         }
         const auto start = std::chrono::steady_clock::now();
-        const std::size_t before = pipeline_->snapshots().size();
+        const std::size_t before = pipeline_->total_snapshots();
+        const auto events_before = pipeline_->processed_events();
+        const auto trades_before = pipeline_->processed_trades();
         pipeline_->process(events);
-        const std::size_t after = pipeline_->snapshots().size();
+        const auto accepted = pipeline_->processed_events() - events_before;
+        const auto trades = pipeline_->processed_trades() - trades_before;
+        const std::size_t after = pipeline_->total_snapshots();
         const auto finish = std::chrono::steady_clock::now();
         const double elapsed = std::chrono::duration<double, std::nano>(
             finish - start).count();
         process_latency_->observe(elapsed);
-        events_total_->increment(events.size());
+        events_total_->increment(accepted);
         snapshots_total_->increment(after - before);
-        std::uint64_t trades = 0;
-        for (const hft::MarketEvent& event : events) {
-            if (hft::is_trade(event.type)) {
-                ++trades;
-            }
-        }
+        evictions_total_->increment(pipeline_->evicted_snapshots() - evictions_seen_);
+        evictions_seen_ = pipeline_->evicted_snapshots();
         trades_total_->increment(trades);
         last_timestamp_->set(events.back().timestamp_ns);
-        runtime_.stats.messages.fetch_add(events.size(), std::memory_order_relaxed);
+        runtime_.stats.messages.fetch_add(accepted, std::memory_order_relaxed);
         runtime_.stats.trades.fetch_add(trades, std::memory_order_relaxed);
-        runtime_.stats.last_update_ns.store(steady_now_ns(),
-                                            std::memory_order_relaxed);
-        const auto dropped = pipeline_->out_of_order_events() + pipeline_->tracker_dropped();
+        if (accepted != 0) {
+            runtime_.stats.last_update_ns.store(steady_now_ns(), std::memory_order_relaxed);
+        }
+        const auto dropped = runtime_.duplicate_drops + pipeline_->out_of_order_events() + pipeline_->invalid_events() + pipeline_->tracker_dropped();
         runtime_.stats.dropped.store(dropped, std::memory_order_relaxed);
-        if (dropped > 0 || pipeline_->dropped_snapshots() > 0 ||
-            pipeline_->skipped_samples() > 0) runtime_.degraded = true;
+        if (dropped > 0 || pipeline_->skipped_samples() > 0) runtime_.degraded = true;
         refresh_health();
     }
 
@@ -383,6 +397,8 @@ private:
     Runtime& runtime_;
     std::unique_ptr<hft::signal::SignalPipeline<>> pipeline_;
     hft::metrics::Counter* events_total_{};
+    hft::metrics::Counter* evictions_total_{};
+    std::size_t evictions_seen_{0};
     hft::metrics::Counter* trades_total_{};
     hft::metrics::Counter* snapshots_total_{};
     hft::metrics::Counter* parse_errors_{};
@@ -404,9 +420,14 @@ void run_replay(const Options& options, FeedProcessor& processor) {
     for (std::size_t index = 0; index < events.size() && g_running.load();) {
         const std::size_t end = std::min(index + batch_size, events.size());
         if (options.replay_speed > 0.0) {
-            const std::int64_t target_ns = static_cast<std::int64_t>(
-                static_cast<double>(events[end - 1].timestamp_ns - first_timestamp) /
-                options.replay_speed);
+            const long double delay = (static_cast<long double>(events[end - 1].timestamp_ns) -
+                static_cast<long double>(first_timestamp)) / options.replay_speed;
+            const auto max_delay = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::time_point::max() - wall_start).count();
+            if (!std::isfinite(delay) || delay < 0 || delay >= max_delay) {
+                throw std::runtime_error("replay delay is out of range");
+            }
+            const auto target_ns = static_cast<std::int64_t>(delay);
             const auto target = wall_start + std::chrono::nanoseconds(target_ns);
             while (g_running.load() && std::chrono::steady_clock::now() < target) {
                 processor.refresh_health();
@@ -432,7 +453,7 @@ void run_stdin([[maybe_unused]] const Options& options, FeedProcessor& processor
             return;
         }
         const std::size_t count = hft::ingest::split_fields(line, fields);
-        if (count < 8) {
+        if (count < 8 || count > 10) {
             processor.parse_error();
             return;
         }
@@ -467,6 +488,13 @@ void run_stdin([[maybe_unused]] const Options& options, FeedProcessor& processor
         }
         if (has_sequence) {
             const auto gap = processor.runtime().gaps.check("stdin", sequence);
+            if (gap.duplicate) {
+                ++processor.runtime().duplicate_drops;
+                processor.runtime().stats.dropped.fetch_add(1, std::memory_order_relaxed);
+                processor.runtime().degraded = true;
+                processor.refresh_health();
+                return;
+            }
             if (gap.missing > 0) {
                 processor.runtime().stats.gaps.fetch_add(gap.missing,
                                                           std::memory_order_relaxed);

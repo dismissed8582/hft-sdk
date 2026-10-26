@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <fstream>
 #include <numeric>
+#include <istream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -92,15 +93,15 @@ inline bool parse_integer(std::string_view text, Integer& value) noexcept {
 
 inline bool parse_event_type(std::string_view text, EventType& type) noexcept {
     text = trim(text);
-    if (iequals(text, "new") || iequals(text, "add") || iequals(text, "submit")) {
+    if (text == "0" || iequals(text, "new") || iequals(text, "add") || iequals(text, "submit")) {
         type = EventType::New;
-    } else if (iequals(text, "modify") || iequals(text, "update") ||
+    } else if (text == "1" || iequals(text, "modify") || iequals(text, "update") ||
                iequals(text, "replace")) {
         type = EventType::Modify;
-    } else if (iequals(text, "cancel") || iequals(text, "delete") ||
+    } else if (text == "2" || iequals(text, "cancel") || iequals(text, "delete") ||
                iequals(text, "remove")) {
         type = EventType::Cancel;
-    } else if (iequals(text, "trade") || iequals(text, "fill") ||
+    } else if (text == "3" || iequals(text, "trade") || iequals(text, "fill") ||
                iequals(text, "execution")) {
         type = EventType::Trade;
     } else {
@@ -111,13 +112,13 @@ inline bool parse_event_type(std::string_view text, EventType& type) noexcept {
 
 inline bool parse_side(std::string_view text, Side& side) noexcept {
     text = trim(text);
-    if (iequals(text, "bid") || iequals(text, "b")) {
+    if (text == "1" || iequals(text, "bid") || iequals(text, "b")) {
         side = Side::Bid;
-    } else if (iequals(text, "ask") || iequals(text, "offer") || iequals(text, "a")) {
+    } else if (text == "2" || iequals(text, "ask") || iequals(text, "offer") || iequals(text, "a")) {
         side = Side::Ask;
-    } else if (iequals(text, "buy") || iequals(text, "bought")) {
+    } else if (text == "3" || iequals(text, "buy") || iequals(text, "bought")) {
         side = Side::Buy;
-    } else if (iequals(text, "sell") || iequals(text, "sold")) {
+    } else if (text == "4" || iequals(text, "sell") || iequals(text, "sold")) {
         side = Side::Sell;
     } else {
         return false;
@@ -235,20 +236,8 @@ inline void sort_ticks_by_timestamp(std::vector<MarketEvent>& events) {
     events.swap(sorted);
 }
 
-inline std::vector<MarketEvent> load_ticks_csv(const std::string& path) {
-    std::ifstream input(path);
-    if (!input) {
-        throw std::runtime_error("unable to open tick file: " + path);
-    }
-
+inline std::vector<MarketEvent> load_ticks_csv(std::istream& input) {
     std::vector<MarketEvent> events;
-    input.seekg(0, std::ios::end);
-    const std::streamoff file_size = input.tellg();
-    input.seekg(0, std::ios::beg);
-    if (file_size > 0) {
-        events.reserve(static_cast<std::size_t>(file_size / 64));
-    }
-
     std::string line;
     std::array<std::string_view, 32> fields{};
     detail::ColumnMap map{};
@@ -282,9 +271,13 @@ inline std::vector<MarketEvent> load_ticks_csv(const std::string& path) {
             have_map = true;
         }
 
-        const std::size_t required = std::max(
+        std::size_t required = std::max(
             {map.timestamp, map.event_type, map.side, map.order_id, map.price,
              map.quantity});
+        if (map.has_modifications) required = std::max(required, map.modifications);
+        if (map.has_bid) required = std::max(required, map.bid);
+        if (map.has_ask) required = std::max(required, map.ask);
+        if (map.has_parent_order) required = std::max(required, map.parent_order_id);
         if (count <= required) {
             throw std::runtime_error("short tick row: " + line);
         }
@@ -300,23 +293,37 @@ inline std::vector<MarketEvent> load_ticks_csv(const std::string& path) {
         }
         if (map.has_modifications && map.modifications < count &&
             !fields[map.modifications].empty()) {
-            detail::parse_integer(fields[map.modifications], event.modifications);
+            if (!detail::parse_integer(fields[map.modifications], event.modifications)) {
+                throw std::runtime_error("invalid modifications in tick row");
+            }
         }
         if (map.has_bid && map.bid < count) {
-            detail::parse_integer(fields[map.bid], event.bid_price_ticks);
+            if (!detail::parse_integer(fields[map.bid], event.bid_price_ticks)) {
+                throw std::runtime_error("invalid bid_price_ticks in tick row");
+            }
         }
         if (map.has_ask && map.ask < count) {
-            detail::parse_integer(fields[map.ask], event.ask_price_ticks);
+            if (!detail::parse_integer(fields[map.ask], event.ask_price_ticks)) {
+                throw std::runtime_error("invalid ask_price_ticks in tick row");
+            }
         }
         if (map.has_parent_order && map.parent_order_id < count &&
             !fields[map.parent_order_id].empty()) {
             event.parent_order_id = 0;
-            detail::parse_integer(fields[map.parent_order_id],
-                                  event.parent_order_id);
+            if (!detail::parse_integer(fields[map.parent_order_id], event.parent_order_id)) {
+                throw std::runtime_error("invalid parent_order_id in tick row");
+            }
         }
         events.push_back(event);
     }
+    if (input.bad()) throw std::runtime_error("error reading tick stream");
     return events;
+}
+
+inline std::vector<MarketEvent> load_ticks_csv(const std::string& path) {
+    std::ifstream input(path);
+    if (!input) throw std::runtime_error("unable to open tick file: " + path);
+    return load_ticks_csv(input);
 }
 
 }

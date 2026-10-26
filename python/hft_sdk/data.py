@@ -25,6 +25,9 @@ import heapq
 import itertools
 import os
 import pathlib
+import re
+import shutil
+import tempfile
 import urllib.parse
 import urllib.request
 import zipfile
@@ -106,10 +109,11 @@ def _download(
     if destination.exists() and not force:
         if expected_sha256 is None or _sha256(destination) == expected_sha256.lower():
             return destination
-        destination.unlink()
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    partial = destination.with_name(destination.name + ".part")
+    descriptor, temporary = tempfile.mkstemp(prefix=destination.name + ".", suffix=".part", dir=destination.parent)
+    os.close(descriptor)
+    partial = pathlib.Path(temporary)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response, \
@@ -130,6 +134,8 @@ def _download(
                         end="",
                         flush=True,
                     )
+        if total and written != total:
+            raise RuntimeError(f"truncated download: {destination.name}")
         if progress and total:
             print()
         if expected_sha256 is not None:
@@ -210,6 +216,8 @@ def resolve_source(
 def _month_range(start: str, end: str) -> list[str]:
     first = dt.date.fromisoformat(start + "-01" if len(start) == 7 else start)
     last = dt.date.fromisoformat(end + "-01" if len(end) == 7 else end)
+    if last < first:
+        raise ValueError("end date must not precede start date")
     months: list[str] = []
     year, month = first.year, first.month
     while (year, month) <= (last.year, last.month):
@@ -224,6 +232,8 @@ def _month_range(start: str, end: str) -> list[str]:
 def _day_range(start: str, end: str) -> list[str]:
     first = dt.date.fromisoformat(start)
     last = dt.date.fromisoformat(end)
+    if last < first:
+        raise ValueError("end date must not precede start date")
     return [
         (first + dt.timedelta(days=offset)).isoformat()
         for offset in range((last - first).days + 1)
@@ -237,14 +247,38 @@ def _binance_url(market: str, kind: str, symbol: str, period: str,
     return f"{BINANCE_BASE}/{prefix}/{folder}/{kind}/{symbol}/{symbol}-{kind}-{period}.zip"
 
 
-def _checksum(url: str) -> str | None:
-    request = urllib.request.Request(url + ".CHECKSUM",
-                                     headers={"User-Agent": USER_AGENT})
+def _checksum(url: str) -> str:
+    request = urllib.request.Request(url + ".CHECKSUM", headers={"User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            return response.read().decode().split()[0].strip()
-    except Exception:
-        return None
+            expected = response.read().decode().split()[0].strip().lower()
+    except Exception as error:
+        raise RuntimeError("unable to verify Binance archive checksum") from error
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise RuntimeError("invalid Binance archive checksum")
+    return expected
+
+
+def _extract_csv(archive: pathlib.Path, destination: pathlib.Path) -> None:
+    # Extract only the expected CSV, never arbitrary paths supplied by a ZIP.
+    with zipfile.ZipFile(archive) as zipped:
+        members = [item for item in zipped.infolist() if item.filename == destination.name]
+        if len(members) != 1 or members[0].is_dir():
+            raise RuntimeError(f"archive must contain exactly one {destination.name}")
+        descriptor, name = tempfile.mkstemp(prefix=destination.name + ".", suffix=".part", dir=destination.parent)
+        temporary = pathlib.Path(name)
+        try:
+            with os.fdopen(descriptor, "wb") as output, zipped.open(members[0]) as source:
+                shutil.copyfileobj(source, output)
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def _safe_component(value: str, name: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise ValueError(f"invalid {name}")
+    return value
 
 
 def _fetch_binance_one(
@@ -268,15 +302,9 @@ def _fetch_binance_one(
         expected_sha256=_checksum(url),
         progress=progress,
     )
-    with zipfile.ZipFile(archive) as zipped:
-        zipped.extractall(out_dir)
+    _extract_csv(archive, csv_path)
     if not keep_zip:
         archive.unlink(missing_ok=True)
-    if not csv_path.exists():
-        extracted = list(out_dir.glob(pathlib.Path(name).stem + "*"))
-        if not extracted:
-            raise RuntimeError(f"archive did not contain {csv_path.name}")
-        csv_path = extracted[0]
     return csv_path
 
 
@@ -300,6 +328,7 @@ def fetch_binance(
     ``aggTrades`` or ``bookDepth``. Dates are ``YYYY-MM-DD`` (daily) or
     ``YYYY-MM`` (monthly). ``bookDepth`` is futures+daily only.
     """
+    symbol = _safe_component(symbol.upper(), "symbol")
     if market not in {"spot", "futures"}:
         raise ValueError("market must be spot or futures")
     if kind not in {"trades", "aggTrades", "bookDepth"}:
@@ -346,6 +375,11 @@ def fetch_crypto_lob(
     ``table`` is ``depth``, ``snapshots`` or ``trades`` and ``period`` is
     ``YYYY-MM``. Files are cached under ``<data-dir>/crypto-lob`` by default.
     """
+    symbol = _safe_component(symbol.upper(), "symbol")
+    exchange = _safe_component(exchange, "exchange")
+    if not re.fullmatch(r"\d{4}-\d{2}", period):
+        raise ValueError("period must be YYYY-MM")
+    dt.date.fromisoformat(period + "-01")
     if table not in {"depth", "snapshots", "trades"}:
         raise ValueError("table must be depth, snapshots or trades")
     url = f"{HF_BASE}/{table}/{exchange}/{symbol}/{period}.parquet"
@@ -957,3 +991,4 @@ def to_tick_csv(
             ])
             writer.writerows(rows.tolist())
     return destination
+

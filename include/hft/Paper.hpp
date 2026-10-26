@@ -82,6 +82,23 @@ struct FilterMaskTable {
     lifecycles.reserve(events.size() / 4 + 1);
 
     for (const MarketEvent& event : events) {
+        if (event.type == EventType::Trade) {
+            if (event.parent_order_id == 0) continue;
+            const auto found = lifecycles.find(event.parent_order_id);
+            if (found != lifecycles.end() && found->second.saw_new && event.quantity > 0) {
+                auto& parent = found->second;
+                parent.last_seen_ns = std::max(parent.last_seen_ns, event.timestamp_ns);
+                if (!parent.has_full_execution) {
+                    parent.remaining_quantity = std::max<std::int64_t>(0,
+                        parent.remaining_quantity - event.quantity);
+                    if (parent.remaining_quantity == 0) {
+                        parent.has_full_execution = true;
+                        parent.fully_executed_ns = event.timestamp_ns;
+                    }
+                }
+            }
+            continue;
+        }
         Lifecycle& lifecycle = lifecycles[event.order_id];
         if (lifecycle.first_seen_ns == kNoTimestamp ||
             event.timestamp_ns < lifecycle.first_seen_ns) {
@@ -94,6 +111,7 @@ struct FilterMaskTable {
             lifecycle.remaining_quantity = event.quantity > 0 ? event.quantity : 0;
             break;
         case EventType::Modify:
+            lifecycle.remaining_quantity = std::max<std::int64_t>(0, event.quantity);
             lifecycle.previous_modification_ns = lifecycle.last_modification_ns;
             lifecycle.last_modification_ns = event.timestamp_ns;
             ++lifecycle.modifications;
@@ -102,21 +120,7 @@ struct FilterMaskTable {
             lifecycle.has_cancel = true;
             lifecycle.cancel_ns = event.timestamp_ns;
             break;
-        case EventType::Trade: {
-            const std::uint64_t parent = event.parent_order_id != 0
-                ? event.parent_order_id
-                : event.order_id;
-            const auto iterator = lifecycles.find(parent);
-            if (iterator != lifecycles.end() && iterator->second.saw_new &&
-                event.quantity > 0 && !iterator->second.has_full_execution) {
-                iterator->second.remaining_quantity -= event.quantity;
-                if (iterator->second.remaining_quantity <= 0) {
-                    iterator->second.has_full_execution = true;
-                    iterator->second.fully_executed_ns = event.timestamp_ns;
-                }
-            }
-            break;
-        }
+        case EventType::Trade: break;
         }
     }
 
@@ -235,6 +239,17 @@ namespace detail {
     std::span<const MarketEvent> events,
     const obi::FilterThresholds& thresholds,
     const PaperConfig& config = {}) {
+    if (config.obi_window_ns <= 0 || config.sample_ns <= 0 || config.anchor_ns <= 0 ||
+        config.max_catchup_samples == 0) throw std::invalid_argument("invalid paper configuration");
+    const auto margin = std::max({config.sample_ns, config.anchor_ns, kHorizonNs.back()});
+    std::int64_t previous = 0;
+    for (const auto& event : events) {
+        if (event.timestamp_ns < previous || event.quantity < 0 ||
+            event.timestamp_ns > std::numeric_limits<std::int64_t>::max() - margin) {
+            throw std::invalid_argument("paper input must have ordered, valid timestamps and quantities");
+        }
+        previous = event.timestamp_ns;
+    }
     std::vector<PaperTick> ticks;
     if (events.empty()) {
         return ticks;
@@ -330,7 +345,8 @@ namespace detail {
                 if (event.type == EventType::Cancel && !masks.contains(parent)) {
                     skip = true;
                 } else {
-                    mask = masks.get(parent);
+                    mask = event.type == EventType::Trade && event.parent_order_id == 0
+                        ? kAllSchemes : masks.get(parent);
                 }
             } else {
                 const auto observation = tracker->observe(event);
@@ -397,3 +413,4 @@ namespace detail {
 }
 
 } // namespace hft::paper
+

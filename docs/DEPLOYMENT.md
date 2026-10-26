@@ -48,8 +48,8 @@ HFT_HTTP_PORT=9200 hft_feed --config config/hft_feed.conf --stdin
 ### Docker
 
 ```bash
-docker build -t hft-sdk:1.0.0 .
-docker run --rm -i -p 127.0.0.1:9100:9100 hft-sdk:1.0.0 --config /etc/hft/hft_feed.conf --stdin
+docker build -t hft-sdk:1.0.1 .
+docker run --rm -i -p 127.0.0.1:9100:9100 hft-sdk:1.0.1 --config /etc/hft/hft_feed.conf --stdin
 ```
 
 ### Health semantics
@@ -74,3 +74,12 @@ its JSON `status` for feed readiness. It is not a readiness HTTP status endpoint
 The Docker command keeps stdin open with `-i`. Pipe a producer of normalized
 records into it. EOF and replay completion stop the runtime and its endpoints.
 Published metrics are restricted to the host loopback interface in this example.
+
+Duplicate/out-of-order sequence numbers on stdin are discarded and counted in
+`dropped`; they cannot count the same event twice. Invalid event values and late
+timestamps are also exposed as drops. Valid event counters exclude these rows.
+Historical snapshot evictions are normal bounded retention and have a separate
+`hft_snapshot_evictions_total` counter; they do not degrade feed readiness.
+
+Use `--max-snapshots N` or `feed.max_snapshots=N` to set retention; zero is an
+explicit unbounded-history opt-in. Default sampling remains 250 ms.

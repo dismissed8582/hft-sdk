@@ -65,10 +65,14 @@ inline std::uint64_t read_crypto_lob_depth_csv(const std::string& path,
             throw std::runtime_error("malformed crypto-lob depth row: " +
                                      std::string(line));
         }
+        if (timestamp_ms < 0 || timestamp_ms > std::numeric_limits<std::int64_t>::max() / 1'000'000) {
+            throw std::runtime_error("crypto-lob timestamp is out of range");
+        }
         row.timestamp_ns = timestamp_ms * 1'000'000;
         row.sequence = sequence;
         row.exchange = fields[1];
         row.asset = fields[2];
+        if (fields[3] != "bid" && fields[3] != "ask") throw std::runtime_error("invalid crypto-lob side");
         row.side = fields[3] == "bid" ? Side::Bid : Side::Ask;
         if (!exchange_filter.empty() && row.exchange != exchange_filter) {
             return;
@@ -83,3 +87,4 @@ inline std::uint64_t read_crypto_lob_depth_csv(const std::string& path,
 }
 
 } // namespace hft::ingest
+
