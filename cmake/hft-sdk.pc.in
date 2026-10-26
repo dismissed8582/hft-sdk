@@ -6,5 +6,7 @@ includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
 Name: hft-sdk
 Description: Low-latency LOB signal engine and market-data infrastructure
 Version: @PROJECT_VERSION@
-Cflags: -I${includedir}
-Libs: -L${libdir} -lhft_sdk
+Requires: @HFT_PC_REQUIRES@
+Cflags: -I${includedir} -std=c++20 -pthread @HFT_PC_DEFINES@
+Libs: @HFT_PC_LIBS@ -pthread
+

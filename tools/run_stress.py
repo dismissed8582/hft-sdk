@@ -251,6 +251,13 @@ def write_report(results: list[RunResult], out_dir: pathlib.Path) -> None:
     (out_dir / "STRESS_REPORT.md").write_text("\n".join(lines) + "\n")
 
 
+def case_passed(result: RunResult) -> bool:
+    if result.name == "paper_eval/empty":
+        return (not result.timed_out and result.returncode == 1 and
+                "no events" in result.stderr.lower())
+    return not result.timed_out and result.returncode == 0
+
+
 def main() -> int:
     args = parse_args()
     build = args.build_dir.resolve()
@@ -335,11 +342,9 @@ def main() -> int:
         ))
 
     write_report(results, args.out_dir)
-    failures = [result for result in results
-                if result.timed_out or result.returncode != 0]
-    expected_edge_failures = {"paper_eval/empty"}
-    unexpected = [result for result in failures
-                  if result.name not in expected_edge_failures]
+    # Only an ordinary input-validation exit is expected for the empty case.
+    # A crash, timeout, or accidental success must fail the harness too.
+    unexpected = [result for result in results if not case_passed(result)]
     print(f"stress cases: {len(results)}")
     print(f"unexpected failures: {len(unexpected)}")
     for result in unexpected:
@@ -349,3 +354,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

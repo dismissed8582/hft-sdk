@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -175,8 +177,11 @@ Options parse_options(int argc, char** argv) {
         } else if (argument == "--lifetime-ms") {
             options.lifetime_ms = parse_i64(value, "lifetime-ms");
         } else if (argument == "--max-mods") {
-            options.max_modifications = static_cast<std::uint32_t>(
-                parse_i64(value, "max-mods"));
+            const auto max_mods = parse_i64(value, "max-mods");
+            if (max_mods < 0 || max_mods > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::runtime_error("max-mods is out of range");
+            }
+            options.max_modifications = static_cast<std::uint32_t>(max_mods);
         } else if (argument == "--mod-time-ms") {
             options.min_modification_interval_ms = parse_i64(value, "mod-time-ms");
         } else {
@@ -188,6 +193,12 @@ Options parse_options(int argc, char** argv) {
         options.maker_fee_bps < 0.0 || options.taker_fee_bps < 0.0) {
         throw std::runtime_error("sampling, latency, and fee inputs must be non-negative");
     }
+    if (options.sample_interval_ms > std::numeric_limits<std::int64_t>::max() / 1'000'000 ||
+        options.lifetime_ms > std::numeric_limits<std::int64_t>::max() / 1'000'000 ||
+        options.min_modification_interval_ms > std::numeric_limits<std::int64_t>::max() / 1'000'000 ||
+        options.latency_us > std::numeric_limits<std::int64_t>::max() / 1000 ||
+        !std::isfinite(options.maker_fee_bps) || !std::isfinite(options.taker_fee_bps) ||
+        !std::isfinite(options.pnl_threshold) || options.pnl_threshold < 0) throw std::runtime_error("numeric option is out of range");
     return options;
 }
 

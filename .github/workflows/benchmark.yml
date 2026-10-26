@@ -59,6 +59,9 @@ jobs:
       - name: Smoke-test feed runtime
         run: ./build/hft_feed --replay data/sample_ticks.csv --http-port 0 --replay-speed 1000
 
+      - name: Version metadata consistency
+        run: python3 -m unittest discover -s tests -p test_metadata.py -v
+
       - name: Pairs position-rule tests
         run: python3 -m unittest discover -s tests -p 'test_pairs.py' -v
 
@@ -80,12 +83,15 @@ jobs:
 
 
   wheel:
+    strategy:
+      matrix:
+        python: ["3.9", "3.12"]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
       - run: python -m pip wheel . --no-deps --wheel-dir dist
       - name: Install and exercise the wheel outside the source tree
         run: |
@@ -102,3 +108,36 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker build -t hft-sdk:ci .
       - run: python3 tests/smoke_container.py hft-sdk:ci
+
+  consumers:
+    name: consumer-${{ matrix.os }}-${{ matrix.compiler }}-zlib${{ matrix.disable_zlib }}-shared${{ matrix.shared }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, compiler: g++, disable_zlib: "OFF", shared: "ON"}
+          - {os: ubuntu-latest, compiler: clang++, disable_zlib: "ON", shared: "ON"}
+          - {os: ubuntu-latest, compiler: g++, disable_zlib: "ON", shared: "OFF"}
+          - {os: macos-latest, compiler: clang++, disable_zlib: "OFF", shared: "ON"}
+    env:
+      CXX: ${{ matrix.compiler }}
+      BUILD_DIR: build-consumer
+      JOBS: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install macOS pkg-config dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew install zlib pkgconf
+          echo "PKG_CONFIG_PATH=$(brew --prefix zlib)/lib/pkgconfig" >> "$GITHUB_ENV"
+      - name: Build and exercise installed consumers
+        run: |
+          ./tools/test_consumer.sh -DHFT_BUILD_PYTHON=OFF -DHFT_BUILD_BENCHMARKS=OFF \
+            -DHFT_BUILD_EVALUATOR=OFF -DHFT_BUILD_REPLAY=OFF -DHFT_ARCH_NATIVE=OFF \
+            -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=${{ matrix.disable_zlib }} \
+            -DHFT_BUILD_SHARED_SDK=${{ matrix.shared }}
+          ctest --test-dir "$BUILD_DIR" --output-on-failure

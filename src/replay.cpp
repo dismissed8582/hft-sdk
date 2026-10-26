@@ -8,6 +8,9 @@
 #include "hft/ingest/Replay.hpp"
 
 #include <cstdint>
+#include <cmath>
+#include <limits>
+#include <type_traits>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
@@ -22,6 +25,16 @@
 #include <vector>
 
 namespace {
+
+template <typename Number>
+Number parse_number(const std::string& value) {
+    Number number{};
+    bool valid;
+    if constexpr (std::is_floating_point_v<Number>) valid = hft::ingest::parse_double(value, number);
+    else valid = hft::ingest::parse_integer(value, number);
+    if (!valid) throw std::invalid_argument("invalid numeric option: " + value);
+    return number;
+}
 
 struct Options {
     std::string mode;
@@ -115,23 +128,23 @@ struct Options {
         } else if (argument == "--format") {
             options.format = value;
         } else if (argument == "--price-scale") {
-            options.price_scale = std::stod(value);
+            options.price_scale = parse_number<double>(value);
         } else if (argument == "--qty-scale") {
-            options.quantity_scale = std::stod(value);
+            options.quantity_scale = parse_number<double>(value);
         } else if (argument == "--base-ts") {
-            options.base_timestamp_ns = std::stoll(value);
+            options.base_timestamp_ns = parse_number<std::int64_t>(value);
         } else if (argument == "--step-ns") {
-            options.timestamp_step_ns = std::stoll(value);
+            options.timestamp_step_ns = parse_number<std::int64_t>(value);
         } else if (argument == "--limit") {
-            options.limit = static_cast<std::uint64_t>(std::stoull(value));
+            options.limit = static_cast<std::uint64_t>(parse_number<std::uint64_t>(value));
         } else if (argument == "--sample-ms") {
-            options.sample_ms = std::stoll(value);
+            options.sample_ms = parse_number<std::int64_t>(value);
         } else if (argument == "--lifetime-ms") {
-            options.lifetime_ms = std::stoll(value);
+            options.lifetime_ms = parse_number<std::int64_t>(value);
         } else if (argument == "--mod-time-ms") {
-            options.mod_time_ms = std::stoll(value);
+            options.mod_time_ms = parse_number<std::int64_t>(value);
         } else if (argument == "--max-mods") {
-            options.max_mods = static_cast<std::uint32_t>(std::stoul(value));
+            options.max_mods = static_cast<std::uint32_t>(parse_number<std::uint32_t>(value));
         } else if (argument == "--scores") {
             options.scores = value;
         } else if (argument == "--regimes") {
@@ -140,7 +153,7 @@ struct Options {
             options.regime_scheme = value;
             (void)parse_scheme(options.regime_scheme);
         } else if (argument == "--regime-horizon") {
-            options.regime_horizon_seconds = std::stoll(value);
+            options.regime_horizon_seconds = parse_number<std::int64_t>(value);
             (void)parse_horizon(options.regime_horizon_seconds);
         } else if (argument == "--regime-signal") {
             if (value != "volume" && value != "count") {
@@ -148,13 +161,20 @@ struct Options {
             }
             options.regime_signal = value;
         } else if (argument == "--max-snapshots") {
-            options.max_snapshots = static_cast<std::size_t>(std::stoull(value));
+            options.max_snapshots = static_cast<std::size_t>(parse_number<std::uint64_t>(value));
         } else {
             throw std::runtime_error("unknown option: " + argument);
         }
     }
     if (options.file.empty()) {
         throw std::runtime_error("--file is required");
+    }
+    constexpr auto max_ms = std::numeric_limits<std::int64_t>::max() / 1'000'000;
+    if (options.price_scale <= 0 || options.quantity_scale <= 0 ||
+        options.base_timestamp_ns < 0 || options.timestamp_step_ns < 0 || options.sample_ms <= 0 ||
+        options.sample_ms > max_ms || options.lifetime_ms < 0 || options.lifetime_ms > max_ms ||
+        options.mod_time_ms < 0 || options.mod_time_ms > max_ms) {
+        throw std::runtime_error("numeric replay option is out of range");
     }
     return options;
 }
@@ -416,6 +436,8 @@ int main(int argc, char** argv) {
         } else if (options.mode == "lobster") {
             hft::ingest::LobsterOptions lobster_options{};
             lobster_options.base_timestamp_ns = options.base_timestamp_ns;
+            lobster_options.price_scale = options.price_scale;
+            lobster_options.quantity_scale = options.quantity_scale;
             const auto read = hft::ingest::read_lobster_messages(
                 options.file, lobster_options,
                 [&](const hft::MarketEvent& event) { runner.submit(event); });
@@ -471,3 +493,4 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
+

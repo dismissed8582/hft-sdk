@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -80,8 +82,11 @@ struct Options {
         } else if (argument == "--lifetime-ms") {
             options.lifetime_ms = parse_i64(value, "lifetime-ms");
         } else if (argument == "--max-mods") {
-            options.max_modifications = static_cast<std::uint32_t>(
-                parse_i64(value, "max-mods"));
+            const auto max_mods = parse_i64(value, "max-mods");
+            if (max_mods < 0 || max_mods > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::runtime_error("max-mods is out of range");
+            }
+            options.max_modifications = static_cast<std::uint32_t>(max_mods);
         } else if (argument == "--mod-time-ms") {
             options.mod_time_ms = parse_i64(value, "mod-time-ms");
         } else if (argument == "--obi-window-ms") {
@@ -91,8 +96,9 @@ struct Options {
         } else if (argument == "--sample-ms") {
             options.sample_ms = parse_i64(value, "sample-ms");
         } else if (argument == "--limit") {
-            options.limit = static_cast<std::size_t>(
-                parse_i64(value, "limit"));
+            const auto limit = parse_i64(value, "limit");
+            if (limit < 0) throw std::runtime_error("limit must be nonnegative");
+            options.limit = static_cast<std::size_t>(limit);
         } else if (argument == "--parent-map") {
             options.parent_map = value;
         } else {
@@ -104,6 +110,11 @@ struct Options {
         options.sample_ms <= 0) {
         throw std::runtime_error("thresholds and windows must be non-negative");
     }
+    if (options.lifetime_ms > std::numeric_limits<std::int64_t>::max() / 1'000'000 ||
+        options.mod_time_ms > std::numeric_limits<std::int64_t>::max() / 1'000'000 ||
+        options.obi_window_ms > std::numeric_limits<std::int64_t>::max() / 1'000'000 ||
+        options.anchor_ms > std::numeric_limits<std::int64_t>::max() / 1'000'000 ||
+        options.sample_ms > std::numeric_limits<std::int64_t>::max() / 1'000'000) throw std::runtime_error("numeric option is out of range");
     return options;
 }
 

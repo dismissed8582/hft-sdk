@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <cstddef>
@@ -8,6 +9,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -66,91 +68,21 @@ template <typename Integer>
 [[nodiscard]] inline bool parse_double(std::string_view text,
                                        double& value) noexcept {
     text = trim(text);
-    if (text.empty()) {
-        return false;
-    }
-    std::size_t index = 0;
-    bool negative = false;
-    if (text[index] == '+' || text[index] == '-') {
-        negative = text[index] == '-';
-        ++index;
-    }
+    if (!text.empty() && text.front() == '+') text.remove_prefix(1);
+    if (text.empty()) return false;
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), value,
+                                        std::chars_format::general);
+    return result.ec == std::errc{} && result.ptr == text.data() + text.size() &&
+           std::isfinite(value);
+}
 
-    std::uint64_t mantissa = 0;
-    int digits = 0;
-    int fractional = 0;
-    bool seen_digit = false;
-    bool seen_point = false;
-
-    for (; index < text.size(); ++index) {
-        const char character = text[index];
-        if (character == '.') {
-            if (seen_point) {
-                return false;
-            }
-            seen_point = true;
-            continue;
-        }
-        if (character < '0' || character > '9') {
-            break;
-        }
-        seen_digit = true;
-        if (digits < 18) {
-            mantissa = mantissa * 10 + static_cast<std::uint64_t>(character - '0');
-            ++digits;
-            if (seen_point) {
-                ++fractional;
-            }
-        } else if (seen_point) {
-            ++fractional;
-        }
+[[nodiscard]] inline std::int64_t scaled_integer(double value, double scale) {
+    const long double scaled = static_cast<long double>(value) * scale;
+    if (!std::isfinite(value) || !std::isfinite(scale) || value < 0 || scale <= 0 ||
+        scaled >= static_cast<long double>(std::numeric_limits<std::int64_t>::max())) {
+        throw std::out_of_range("scaled market-data value is out of range");
     }
-    if (!seen_digit) {
-        return false;
-    }
-
-    int exponent = 0;
-    if (index < text.size() && (text[index] == 'e' || text[index] == 'E')) {
-        ++index;
-        bool exponent_negative = false;
-        if (index < text.size() && (text[index] == '+' || text[index] == '-')) {
-            exponent_negative = text[index] == '-';
-            ++index;
-        }
-        if (index >= text.size()) {
-            return false;
-        }
-        int magnitude = 0;
-        for (; index < text.size(); ++index) {
-            const char character = text[index];
-            if (character < '0' || character > '9') {
-                return false;
-            }
-            magnitude = magnitude * 10 + (character - '0');
-            if (magnitude > 308) {
-                return false;
-            }
-        }
-        exponent = exponent_negative ? -magnitude : magnitude;
-    } else if (index != text.size()) {
-        return false;
-    }
-
-    static constexpr double kPow10[] = {
-        1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,  1e8,  1e9,
-        1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19,
-        1e20, 1e21, 1e22};
-    const int power = exponent - fractional;
-    double result = 0.0;
-    if (power >= 0 && power <= 22) {
-        result = static_cast<double>(mantissa) * kPow10[power];
-    } else if (power < 0 && power >= -22) {
-        result = static_cast<double>(mantissa) / kPow10[-power];
-    } else {
-        result = static_cast<double>(mantissa) * std::pow(10.0, power);
-    }
-    value = negative ? -result : result;
-    return std::isfinite(value);
+    return std::llround(scaled);
 }
 
 template <std::size_t Capacity>
@@ -190,12 +122,10 @@ template <std::size_t Capacity>
 [[nodiscard]] inline bool parse_utc_ns(std::string_view text,
                                        std::int64_t& timestamp_ns) noexcept {
     text = trim(text);
-    if (text.size() < 19) {
-        return false;
-    }
-    if (text[10] != ' ' && text[10] != 'T' && text[10] != 't') {
-        return false;
-    }
+    if (text.size() < 19 || text[4] != '-' || text[7] != '-' ||
+        text[13] != ':' || text[16] != ':' ||
+        (text[10] != ' ' && text[10] != 'T' && text[10] != 't')) return false;
+
     std::int64_t year = 0;
     unsigned month = 0;
     unsigned day = 0;
@@ -210,33 +140,90 @@ template <std::size_t Capacity>
         !parse_integer(text.substr(17, 2), second)) {
         return false;
     }
-    if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 ||
-        minute > 59 || second > 60) {
-        return false;
-    }
+    if (year < 1 || year > 9999 || month < 1 || month > 12 || day < 1 || hour > 23 ||
+        minute > 59 || second > 59) return false;
+    constexpr unsigned lengths[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    const bool leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    if (day > lengths[month - 1] + (month == 2 && leap ? 1u : 0u)) return false;
     std::int64_t nanoseconds = 0;
-    if (text.size() > 19 && text[19] == '.') {
+    auto suffix = text.substr(19);
+    if (!suffix.empty() && (suffix.back() == 'Z' || suffix.back() == 'z')) suffix.remove_suffix(1);
+    if (!suffix.empty()) {
+        if (suffix.front() != '.' || suffix.size() < 2 || suffix.size() > 10) return false;
         std::int64_t scale = 100'000'000;
-        for (std::size_t index = 20; index < text.size(); ++index) {
-            const char character = text[index];
-            if (character < '0' || character > '9') {
-                return false;
-            }
-            nanoseconds += static_cast<std::int64_t>(character - '0') * scale;
+        for (const auto character : suffix.substr(1)) {
+            if (character < '0' || character > '9') return false;
+            nanoseconds += (character - '0') * scale;
             scale /= 10;
-            if (scale == 0) {
-                break;
-            }
         }
     }
-    const std::int64_t days = days_from_civil(year, month, day);
-    timestamp_ns = ((days * 24 + static_cast<std::int64_t>(hour)) * 60 +
-                    static_cast<std::int64_t>(minute)) *
-                       60 * 1'000'000'000 +
-                   static_cast<std::int64_t>(second) * 1'000'000'000 +
-                   nanoseconds;
+    const auto seconds = days_from_civil(year, month, day) * 86400 +
+        static_cast<std::int64_t>(hour) * 3600 + minute * 60 + second;
+    constexpr std::int64_t billion = 1'000'000'000;
+    if (seconds >= 0) {
+        if (seconds > (std::numeric_limits<std::int64_t>::max() - nanoseconds) / billion) return false;
+        timestamp_ns = seconds * billion + nanoseconds;
+    } else {
+        if (seconds < std::numeric_limits<std::int64_t>::min() / billion - 1) return false;
+        const auto magnitude = static_cast<std::uint64_t>(-seconds) * billion - nanoseconds;
+        const auto limit = std::uint64_t{1} << 63;
+        if (magnitude > limit) return false;
+        timestamp_ns = magnitude == limit ? std::numeric_limits<std::int64_t>::min()
+                                         : -static_cast<std::int64_t>(magnitude);
+    }
     return true;
 }
+
+#if defined(HFT_WITH_ZLIB)
+// Use inflate directly: some gzread implementations treat a truncated footer
+// as ordinary EOF. Require a verified stream end for every gzip member.
+template <typename Callback>
+inline void for_each_gzip_chunk(const std::string& path, Callback&& callback) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) throw std::runtime_error("unable to open gzip file: " + path);
+    z_stream stream{};
+    if (inflateInit2(&stream, 16 + MAX_WBITS) != Z_OK) {
+        throw std::runtime_error("unable to initialize gzip decoder");
+    }
+    struct Cleanup {
+        z_stream* stream;
+        ~Cleanup() { inflateEnd(stream); }
+    } cleanup{&stream};
+    std::array<unsigned char, 65536> compressed{}, decoded{};
+    bool complete = false;
+    while (input) {
+        input.read(reinterpret_cast<char*>(compressed.data()), compressed.size());
+        const auto count = input.gcount();
+        if (count == 0) break;
+        stream.next_in = compressed.data();
+        stream.avail_in = static_cast<uInt>(count);
+        do {
+            if (complete) {
+                auto* next = stream.next_in;
+                const auto remaining = stream.avail_in;
+                if (inflateReset2(&stream, 16 + MAX_WBITS) != Z_OK) {
+                    throw std::runtime_error("gzip reset failed");
+                }
+                stream.next_in = next;
+                stream.avail_in = remaining;
+                complete = false;
+            }
+            stream.next_out = decoded.data();
+            stream.avail_out = static_cast<uInt>(decoded.size());
+            const int result = inflate(&stream, Z_NO_FLUSH);
+            const auto produced = decoded.size() - stream.avail_out;
+            if (result == Z_BUF_ERROR && stream.avail_in == 0 && produced == 0) break;
+            if (result != Z_OK && result != Z_STREAM_END) {
+                throw std::runtime_error("corrupt or truncated gzip input: " + path);
+            }
+            if (produced) callback(std::string_view(
+                reinterpret_cast<const char*>(decoded.data()), produced));
+            complete = result == Z_STREAM_END;
+        } while (stream.avail_in != 0 || (stream.avail_out == 0 && !complete));
+    }
+    if (input.bad() || !complete) throw std::runtime_error("truncated gzip input: " + path);
+}
+#endif
 
 // Supports .gz transparently when the build links zlib. The callback receives
 // a string_view valid only for the duration of the call.
@@ -247,30 +234,30 @@ inline std::uint64_t for_each_line(const std::string& path, Callback&& callback)
                       path.compare(path.size() - 3, 3, ".gz") == 0;
 #if defined(HFT_WITH_ZLIB)
     if (gzip) {
-        gzFile file = gzopen(path.c_str(), "rb");
-        if (file == nullptr) {
-            throw std::runtime_error("unable to open gzip file: " + path);
-        }
-        std::string buffer(1u << 20, '\0');
-        while (gzgets(file, buffer.data(), static_cast<int>(buffer.size())) !=
-               nullptr) {
-            std::string_view line(buffer.data(), std::strlen(buffer.data()));
-            if (!line.empty() && line.back() == '\n') {
-                line.remove_suffix(1);
+        std::string line;
+        for_each_gzip_chunk(path, [&](std::string_view chunk) {
+            for (const char value : chunk) {
+                if (value == '\n') {
+                    if (!line.empty() && line.back() == '\r') line.pop_back();
+                    callback(std::string_view(line));
+                    ++lines;
+                    line.clear();
+                } else {
+                    line.push_back(value);
+                }
             }
-            if (!line.empty() && line.back() == '\r') {
-                line.remove_suffix(1);
-            }
-            callback(line);
+        });
+        if (!line.empty()) {
+            if (line.back() == '\r') line.pop_back();
+            callback(std::string_view(line));
             ++lines;
         }
-        gzclose(file);
         return lines;
     }
 #else
     if (gzip) {
         throw std::runtime_error(
-            "gzip input requires zlib; reconfigure with HFT_WITH_ZLIB=ON: " +
+            "gzip input requires zlib; install zlib development files and rebuild: " +
             path);
     }
 #endif
@@ -300,39 +287,28 @@ inline std::uint64_t for_each_record(const std::string& path,
                       path.compare(path.size() - 3, 3, ".gz") == 0;
 #if defined(HFT_WITH_ZLIB)
     if (gzip) {
-        gzFile file = gzopen(path.c_str(), "rb");
-        if (file == nullptr) {
-            throw std::runtime_error("unable to open gzip file: " + path);
-        }
         std::array<std::uint8_t, RecordSize> record{};
-        while (true) {
-            std::size_t filled = 0;
-            while (filled < record.size()) {
-                const int read = gzread(
-                    file, record.data() + filled,
-                    static_cast<unsigned>(record.size() - filled));
-                if (read <= 0) {
-                    break;
+        std::size_t filled = 0;
+        for_each_gzip_chunk(path, [&](std::string_view chunk) {
+            while (!chunk.empty()) {
+                const auto count = std::min(chunk.size(), record.size() - filled);
+                std::memcpy(record.data() + filled, chunk.data(), count);
+                filled += count;
+                chunk.remove_prefix(count);
+                if (filled == record.size()) {
+                    callback(record);
+                    ++records;
+                    filled = 0;
                 }
-                filled += static_cast<std::size_t>(read);
             }
-            if (filled == 0) {
-                break;
-            }
-            if (filled != record.size()) {
-                gzclose(file);
-                throw std::runtime_error("truncated binary record: " + path);
-            }
-            callback(record);
-            ++records;
-        }
-        gzclose(file);
+        });
+        if (filled != 0) throw std::runtime_error("truncated binary record: " + path);
         return records;
     }
 #else
     if (gzip) {
         throw std::runtime_error(
-            "gzip input requires zlib; reconfigure with HFT_WITH_ZLIB=ON: " +
+            "gzip input requires zlib; install zlib development files and rebuild: " +
             path);
     }
 #endif
@@ -346,7 +322,10 @@ inline std::uint64_t for_each_record(const std::string& path,
         callback(record);
         ++records;
     }
+    if (input.gcount() != 0) throw std::runtime_error("truncated binary record: " + path);
+    if (input.bad()) throw std::runtime_error("error reading binary file: " + path);
     return records;
 }
 
 } // namespace hft::ingest
+

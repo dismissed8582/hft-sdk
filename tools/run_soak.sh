@@ -28,6 +28,7 @@ if command -v /usr/bin/time >/dev/null 2>&1; then
 fi
 
 {
+    echo "Repeated replay test; does not establish continuous live-feed soak coverage."
     echo "soak generated $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "data=$DATA iterations=$ITERATIONS"
     for iteration in $(seq 1 "$ITERATIONS"); do
@@ -37,3 +38,4 @@ fi
             2>&1 | tail -20
     done
 } | tee "$OUT/SOAK_REPORT.txt"
+

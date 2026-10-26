@@ -470,9 +470,8 @@ private:
     [[no_unique_address]] WaitStrategy wait_strategy_{};
 };
 
-// Convenience alias for the multi-producer case. The consumer is still
-// single-threaded here; a multi-consumer gating sequence is intentionally out
-// of scope for this SDK because the signal path is a single consumer.
+// Convenience alias for multiple producers gated by one consumer. Use the
+// ProducerBarrier Gating template parameter with ConsumerGroup for fan-out.
 template <typename Entry, std::size_t Capacity,
           typename WaitStrategy = SpinYieldWaitStrategy<>>
 using MultiProducerBarrier =
@@ -486,3 +485,4 @@ using GroupProducerBarrier =
                     ConsumerGroup<Entry, Capacity, WaitStrategy>>;
 
 } // namespace hft::disruptor
+

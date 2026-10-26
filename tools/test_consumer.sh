@@ -4,48 +4,47 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-$ROOT/build}"
-JOBS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
+JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 PREFIX="$(mktemp -d "${TMPDIR:-/tmp}/hft_sdk_install.XXXXXX")"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/hft_sdk_consumer.XXXXXX")"
 trap 'rm -rf "$PREFIX" "$WORK"' EXIT
 
-cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release >/dev/null
+cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release "$@" >/dev/null
 cmake --build "$BUILD_DIR" -j "$JOBS" >/dev/null
 cmake --install "$BUILD_DIR" --prefix "$PREFIX" >/dev/null
 
-cat >"$WORK/CMakeLists.txt" <<'CMAKE'
-cmake_minimum_required(VERSION 3.24)
-project(hft_sdk_consumer LANGUAGES CXX)
-set(CMAKE_CXX_STANDARD 20)
-find_package(HftSdk REQUIRED)
-add_executable(consumer main.cpp)
-target_link_libraries(consumer PRIVATE HftSdk::sdk)
-CMAKE
-
-cat >"$WORK/main.cpp" <<'CPP'
-#include <hft/HftSdk.hpp>
-#include <hft/SPSCQueue.hpp>
-int main() {
-    hft::MarketDataMessage message{};
-    if (!hft::g_market_data_queue.push(message)) {
-        return 1;
-    }
-    hft::MarketDataMessage received{};
-    if (!hft::g_market_data_queue.pop(received)) {
-        return 2;
-    }
-    hft::sdk::OBIFilterEngine engine;
-    return engine.snapshots().empty() ? 0 : 3;
-}
-CPP
-
-cmake -S "$WORK" -B "$WORK/build" -DCMAKE_PREFIX_PATH="$PREFIX" >/dev/null
+cp "$ROOT/examples/consumer/CMakeLists.txt" "$ROOT/examples/consumer/main.cpp" "$WORK/"
+HEADER_ONLY=OFF
+if test "$(sed -n 's/^HFT_BUILD_SHARED_SDK:BOOL=//p' "$BUILD_DIR/CMakeCache.txt")" != "ON"; then
+    HEADER_ONLY=ON
+fi
+cmake -S "$WORK" -B "$WORK/build" -DCMAKE_PREFIX_PATH="$PREFIX" -DHFT_CONSUMER_HEADER_ONLY="$HEADER_ONLY" >/dev/null
 cmake --build "$WORK/build" -j "$JOBS" >/dev/null
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
     DYLD_LIBRARY_PATH="$PREFIX/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" "$WORK/build/consumer"
 else
     LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$WORK/build/consumer"
+fi
+
+# Exercise the installed header-only target independently of the shared SDK.
+cmake -S "$WORK" -B "$WORK/header-build" -DCMAKE_PREFIX_PATH="$PREFIX" \
+    -DHFT_CONSUMER_HEADER_ONLY=ON >/dev/null
+cmake --build "$WORK/header-build" -j "$JOBS" >/dev/null
+"$WORK/header-build/consumer"
+
+# pkg-config must supply public header dependencies as well as linker flags.
+if command -v pkg-config >/dev/null 2>&1; then
+    export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    DEFINES=()
+    if [[ "$HEADER_ONLY" == "ON" ]]; then DEFINES=(-DHFT_CONSUMER_HEADER_ONLY=1); fi
+    "${CXX:-c++}" "$WORK/main.cpp" "${DEFINES[@]}" -o "$WORK/pkg-consumer" \
+        $(pkg-config --cflags --libs hft-sdk)
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        DYLD_LIBRARY_PATH="$PREFIX/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" "$WORK/pkg-consumer"
+    else
+        LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$WORK/pkg-consumer"
+    fi
 fi
 
 # If this build enabled Python, an installed import failure is a test failure.

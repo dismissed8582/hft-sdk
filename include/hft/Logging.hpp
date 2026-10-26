@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <atomic>
 #include <cstdint>
 #include <iostream>
 #include <mutex>
@@ -52,7 +53,17 @@ inline std::string escape(std::string_view value) {
         case '\n': result += "\\n"; break;
         case '\r': result += "\\r"; break;
         case '\t': result += "\\t"; break;
-        default: result.push_back(character); break;
+        default:
+            if (static_cast<unsigned char>(character) < 0x20) {
+                constexpr char hex[] = "0123456789abcdef";
+                const auto code = static_cast<unsigned char>(character);
+                result += "\\u00";
+                result.push_back(hex[code >> 4]);
+                result.push_back(hex[code & 15]);
+            } else {
+                result.push_back(character);
+            }
+            break;
         }
     }
     return result;
@@ -65,8 +76,8 @@ public:
         return logger;
     }
 
-    void set_level(Level level) noexcept { level_ = level; }
-    [[nodiscard]] Level level() const noexcept { return level_; }
+    void set_level(Level level) noexcept { level_.store(level, std::memory_order_relaxed); }
+    [[nodiscard]] Level level() const noexcept { return level_.load(std::memory_order_relaxed); }
 
     void set_stream(std::ostream& stream) noexcept {
         const std::lock_guard<std::mutex> lock(mutex_);
@@ -74,7 +85,8 @@ public:
     }
 
     void log(Level level, std::string_view component, std::string_view message) {
-        if (level < level_ || level_ == Level::Off) {
+        const auto configured = level_.load(std::memory_order_relaxed);
+        if (level < configured || configured == Level::Off) {
             return;
         }
         const auto now = std::chrono::system_clock::now().time_since_epoch();
@@ -90,7 +102,7 @@ public:
 
 private:
     Logger() = default;
-    Level level_{Level::Info};
+    std::atomic<Level> level_{Level::Info};
     std::ostream* stream_{&std::cerr};
     std::mutex mutex_;
 };
@@ -116,3 +128,4 @@ inline void error(std::string_view component, std::string_view message) {
 }
 
 } // namespace hft::logging
+

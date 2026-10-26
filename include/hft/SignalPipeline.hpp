@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <iterator>
 #include <memory>
+#include <limits>
+#include <stdexcept>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -56,9 +58,13 @@ public:
                             std::size_t max_snapshots = std::size_t{1} << 19,
                             std::size_t max_catchup_samples = 10'000)
         : thresholds_(thresholds),
-          sample_interval_ns_(sample_interval_ns > 0 ? sample_interval_ns : 1),
+          sample_interval_ns_(sample_interval_ns),
           max_snapshots_(max_snapshots),
           max_catchup_samples_(max_catchup_samples) {
+        if (sample_interval_ns <= 0 || max_catchup_samples == 0 ||
+            thresholds.lifetime_ns < 0 || thresholds.min_modification_interval_ns < 0) {
+            throw std::invalid_argument("invalid sampling or filter configuration");
+        }
         for (std::size_t index = 0; index < kHorizonNs.size(); ++index) {
             windows_[index] = std::make_unique<obi::BucketedRollingCounts<>>(
                 kHorizonNs[index]);
@@ -70,6 +76,18 @@ public:
 
     void process(std::span<const MarketEvent> events) {
         for (const MarketEvent& event : events) {
+            // Reject values that cannot safely participate in timestamp/window
+            // arithmetic. Zero quantities remain valid for cancel events.
+            const auto margin = std::max(sample_interval_ns_, kHorizonNs.back());
+            if (event.timestamp_ns < 0 ||
+                event.timestamp_ns > std::numeric_limits<std::int64_t>::max() - margin ||
+                event.quantity < 0 || event.price_ticks < 0 ||
+                event.bid_price_ticks < 0 || event.ask_price_ticks < 0 ||
+                static_cast<unsigned>(event.type) > static_cast<unsigned>(EventType::Trade) ||
+                static_cast<unsigned>(event.side) > static_cast<unsigned>(Side::Sell)) {
+                ++invalid_events_;
+                continue;
+            }
             if (!started_) {
                 started_ = true;
                 next_sample_ns_ = event.timestamp_ns + sample_interval_ns_;
@@ -82,6 +100,8 @@ public:
                 continue;
             }
             last_event_timestamp_ns_ = event.timestamp_ns;
+            ++processed_events_;
+            if (is_trade(event.type)) ++processed_trades_;
 
             std::size_t caught_up = 0;
             while (next_sample_ns_ < event.timestamp_ns) {
@@ -91,7 +111,7 @@ public:
                     // one call: that is a multi-millisecond latency spike.
                     const std::int64_t remaining = event.timestamp_ns - next_sample_ns_;
                     skipped_samples_ += static_cast<std::size_t>(
-                        (remaining + sample_interval_ns_ - 1) / sample_interval_ns_);
+                        remaining / sample_interval_ns_ + (remaining % sample_interval_ns_ != 0));
                     next_sample_ns_ = event.timestamp_ns;
                     break;
                 }
@@ -108,9 +128,27 @@ public:
         }
     }
 
+    // Materialize chronological order only when history is requested. Capturing
+    // into a full buffer stays O(1); latest/count queries do not rotate history.
     [[nodiscard]] const std::vector<SignalSnapshot>& snapshots() const noexcept {
+        if (snapshot_head_ != 0) {
+            std::rotate(snapshots_.begin(), snapshots_.begin() + snapshot_head_, snapshots_.end());
+            snapshot_head_ = 0;
+        }
         return snapshots_;
     }
+
+    [[nodiscard]] std::size_t snapshot_count() const noexcept { return snapshots_.size(); }
+    [[nodiscard]] std::size_t total_snapshots() const noexcept { return total_snapshots_; }
+    [[nodiscard]] std::size_t invalid_events() const noexcept { return invalid_events_; }
+    [[nodiscard]] std::size_t processed_events() const noexcept { return processed_events_; }
+    [[nodiscard]] std::size_t processed_trades() const noexcept { return processed_trades_; }
+    [[nodiscard]] const SignalSnapshot* latest_snapshot() const noexcept {
+        if (snapshots_.empty()) return nullptr;
+        const auto index = snapshot_head_ == 0 ? snapshots_.size() - 1 : snapshot_head_ - 1;
+        return &snapshots_[index];
+    }
+    [[nodiscard]] std::size_t evicted_snapshots() const noexcept { return dropped_snapshots_; }
 
     [[nodiscard]] std::size_t dropped_events() const noexcept {
         std::size_t dropped = 0;
@@ -163,15 +201,13 @@ private:
     }
 
     void capture(std::int64_t timestamp_ns) {
-        if (max_snapshots_ != 0 && snapshots_.size() >= max_snapshots_) {
-            ++dropped_snapshots_;
-            return;
-        }
         SignalSnapshot snapshot{};
         snapshot.timestamp_ns = timestamp_ns;
         snapshot.mid = have_quote_ ? midpoint_ticks(last_bid_ticks_, last_ask_ticks_) : 0.0;
-        snapshot.lob_events = interval_lob_events_;
-        snapshot.trade_events = interval_trade_events_;
+        snapshot.lob_events = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+            interval_lob_events_, std::numeric_limits<std::uint32_t>::max()));
+        snapshot.trade_events = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+            interval_trade_events_, std::numeric_limits<std::uint32_t>::max()));
 
         for (std::size_t horizon = 0; horizon < kHorizonNs.size(); ++horizon) {
             windows_[horizon]->advance(timestamp_ns);
@@ -188,7 +224,14 @@ private:
                     obi::trade_order_book_imbalance(weights);
             }
         }
-        snapshots_.push_back(snapshot);
+        if (max_snapshots_ != 0 && snapshots_.size() >= max_snapshots_) {
+            snapshots_[snapshot_head_] = snapshot;
+            snapshot_head_ = (snapshot_head_ + 1) % snapshots_.size();
+            ++dropped_snapshots_;  // Historical evictions, not lost current signals.
+        } else {
+            snapshots_.push_back(snapshot);
+        }
+        ++total_snapshots_;
         interval_lob_events_ = 0;
         interval_trade_events_ = 0;
     }
@@ -200,13 +243,18 @@ private:
     std::array<std::unique_ptr<obi::BucketedRollingCounts<>>, kHorizonNs.size()> windows_{};
     std::unique_ptr<obi::OrderTracker<>> tracker_ =
         std::make_unique<obi::OrderTracker<>>();
-    std::vector<SignalSnapshot> snapshots_{};
+    mutable std::vector<SignalSnapshot> snapshots_{};
+    mutable std::size_t snapshot_head_{0};
+    std::size_t total_snapshots_{0};
+    std::size_t invalid_events_{0};
+    std::size_t processed_events_{0};
+    std::size_t processed_trades_{0};
     std::int64_t next_sample_ns_{0};
     std::int64_t last_event_timestamp_ns_{0};
     std::int64_t last_bid_ticks_{0};
     std::int64_t last_ask_ticks_{0};
-    std::uint32_t interval_lob_events_{0};
-    std::uint32_t interval_trade_events_{0};
+    std::uint64_t interval_lob_events_{0};
+    std::uint64_t interval_trade_events_{0};
     std::size_t out_of_order_events_{0};
     std::size_t dropped_snapshots_{0};
     std::size_t skipped_samples_{0};
@@ -474,3 +522,4 @@ inline std::vector<RegimeTuple> calculate_regimes(
 }
 
 }
+

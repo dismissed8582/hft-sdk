@@ -7,6 +7,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <limits>
+#include <stdexcept>
 #include <numeric>
 #include <vector>
 
@@ -78,6 +80,10 @@ constexpr std::int64_t kNanosecondsPerDay = 86'400LL * 1'000'000'000LL;
 [[nodiscard]] inline Summary run(
     const std::vector<signal::SignalSnapshot>& snapshots,
     const Config& config = {}) {
+    if (config.latency_ns < 0 || !std::isfinite(config.threshold) || config.threshold < 0 ||
+        !std::isfinite(config.maker_fee_bps) || !std::isfinite(config.taker_fee_bps)) {
+        throw std::invalid_argument("invalid backtest latency, threshold, or fees");
+    }
     Summary summary{};
     if (snapshots.size() < 2 || config.horizon >= signal::kHorizonNs.size()) {
         return summary;
@@ -103,6 +109,7 @@ constexpr std::int64_t kNanosecondsPerDay = 86'400LL * 1'000'000'000LL;
             continue;
         }
 
+        if (source.timestamp_ns > std::numeric_limits<std::int64_t>::max() - config.latency_ns) break;
         const std::size_t entry_index = detail::lower_time(
             snapshots, index, source.timestamp_ns + config.latency_ns);
         if (entry_index >= snapshots.size()) {
@@ -114,6 +121,7 @@ constexpr std::int64_t kNanosecondsPerDay = 86'400LL * 1'000'000'000LL;
             continue;
         }
 
+        if (snapshots[entry_index].timestamp_ns > std::numeric_limits<std::int64_t>::max() - holding_ns) break;
         const std::size_t exit_index = detail::lower_time(
             snapshots, entry_index,
             snapshots[entry_index].timestamp_ns + holding_ns);
@@ -243,3 +251,4 @@ constexpr std::int64_t kNanosecondsPerDay = 86'400LL * 1'000'000'000LL;
 }
 
 } // namespace hft::backtest
+

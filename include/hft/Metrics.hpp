@@ -1,6 +1,9 @@
 #pragma once
 
 #include <atomic>
+#include <algorithm>
+#include <cmath>
+#include <stdexcept>
 #include <cstdint>
 #include <iomanip>
 #include <memory>
@@ -69,9 +72,16 @@ class Histogram final : public Metric {
 public:
     Histogram(std::vector<double> buckets, std::string help)
         : Metric(std::move(help)), buckets_(std::move(buckets)),
-          counts_(buckets_.size() + 1, 0) {}
+          counts_(buckets_.size() + 1, 0) {
+        if (std::any_of(buckets_.begin(), buckets_.end(), [](double x) { return !std::isfinite(x); }) ||
+            !std::is_sorted(buckets_.begin(), buckets_.end()) ||
+            std::adjacent_find(buckets_.begin(), buckets_.end()) != buckets_.end()) {
+            throw std::invalid_argument("histogram buckets must be finite and strictly increasing");
+        }
+    }
 
     void observe(double value) noexcept {
+        if (!std::isfinite(value)) return;
         const std::lock_guard<std::mutex> lock(mutex_);
         std::size_t index = 0;
         while (index < buckets_.size() && value > buckets_[index]) {
@@ -120,7 +130,9 @@ public:
         const std::lock_guard<std::mutex> lock(mutex_);
         const auto iterator = metrics_.find(name);
         if (iterator != metrics_.end()) {
-            return static_cast<Histogram&>(*iterator->second);
+            auto* metric = dynamic_cast<Histogram*>(iterator->second.get());
+            if (!metric) throw std::invalid_argument("metric already registered with another type: " + name);
+            return *metric;
         }
         auto metric = std::make_unique<Histogram>(std::move(buckets), help);
         Histogram& reference = *metric;
@@ -146,7 +158,9 @@ private:
         const std::lock_guard<std::mutex> lock(mutex_);
         const auto iterator = metrics_.find(name);
         if (iterator != metrics_.end()) {
-            return static_cast<MetricType&>(*iterator->second);
+            auto* metric = dynamic_cast<MetricType*>(iterator->second.get());
+            if (!metric) throw std::invalid_argument("metric already registered with another type: " + name);
+            return *metric;
         }
         auto metric = std::make_unique<MetricType>(help);
         MetricType& reference = *metric;

@@ -25,6 +25,7 @@ from ._core import (
     BacktestConfig,
     BacktestSummary,
     EngineConfig,
+    EngineStats,
     FilterScheme,
     MarketEvent,
     OBIFilterEngine,
@@ -331,6 +332,7 @@ __all__ = [
     "BacktestConfig",
     "BacktestSummary",
     "EngineConfig",
+    "EngineStats",
     "FilterScheme",
     "MarketEvent",
     "OBIFilterEngine",
@@ -358,3 +360,4 @@ __all__ = [
     "scheme_code",
     "to_tick_csv",
 ]
+

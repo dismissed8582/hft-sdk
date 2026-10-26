@@ -38,6 +38,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--entry-z", type=float, default=2.0)
     parser.add_argument("--exit-z", type=float, default=0.5)
     parser.add_argument("--fee-bps", type=float, default=1.0)
+    parser.add_argument("--periods-per-year", type=float, default=None,
+                        help="Required to annualize Sharpe; otherwise report per-period Sharpe")
     parser.add_argument("--points", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--output-dir", type=Path, default=Path("benchmarks/results/pairs"))
@@ -82,7 +84,18 @@ def next_position(position: int, z: float, entry_z: float, exit_z: float) -> int
 
 
 def backtest(x: np.ndarray, y: np.ndarray, window: int, entry_z: float,
-             exit_z: float, fee_bps: float) -> tuple[pd.DataFrame, dict]:
+             exit_z: float, fee_bps: float,
+             periods_per_year: float | None = None) -> tuple[pd.DataFrame, dict]:
+    x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+    if (x.ndim != 1 or y.ndim != 1 or x.size != y.size or x.size < 2 or
+            not np.isfinite(x).all() or not np.isfinite(y).all() or
+            np.any(x <= 0) or np.any(y <= 0)):
+        raise ValueError("price arrays must be finite, positive, equally sized 1D arrays")
+    if (window < 2 or not np.isfinite([entry_z, exit_z, fee_bps]).all() or
+            not 0 <= exit_z < entry_z or fee_bps < 0 or
+            (periods_per_year is not None and
+             (not np.isfinite(periods_per_year) or periods_per_year <= 0))):
+        raise ValueError("invalid window, thresholds, fees, or annualization frequency")
     design = np.column_stack([np.ones(x.size), x])
     intercept, hedge = np.linalg.lstsq(design, y, rcond=None)[0]
     spread = y - hedge * x - intercept
@@ -99,33 +112,42 @@ def backtest(x: np.ndarray, y: np.ndarray, window: int, entry_z: float,
     trades = []
     entry_index = None
     entry_side = 0
+    entry_equity = 0.0
     for index in range(1, x.size):
         z = zscore[index - 1]
         position = next_position(position, z, entry_z, exit_z)
         spread_change = spread[index] - spread[index - 1]
         gross = position * spread_change
-        cost = abs(position - previous_position) * fee * (abs(y[index]) + abs(hedge * x[index]))
+        cost = abs(position - previous_position) * fee * (abs(y[index - 1]) + abs(hedge * x[index - 1]))
         equity.append(equity[-1] + gross - cost)
         if position != previous_position:
             if previous_position == 0 and position != 0:
-                entry_index = index
+                entry_index = index - 1
                 entry_side = position
+                entry_equity = equity[-2]
             elif position == 0 and previous_position != 0 and entry_index is not None:
                 trades.append({
                     "entry_index": entry_index,
-                    "exit_index": index,
+                    "exit_index": index - 1,
                     "side": entry_side,
-                    "pnl": equity[-1] - equity[entry_index],
+                    "pnl": equity[-1] - entry_equity,
                 })
                 entry_index = None
         previous_position = position
+
+    # Close any remaining position at the final observed quote and account for
+    # both entry and exit fees in each trade's PnL.
+    if position != 0 and entry_index is not None:
+        equity[-1] -= fee * (abs(y[-1]) + abs(hedge * x[-1]))
+        trades.append({"entry_index": entry_index, "exit_index": x.size - 1,
+                       "side": entry_side, "pnl": equity[-1] - entry_equity})
 
     equity_array = np.asarray(equity, dtype=float)
     peak = np.maximum.accumulate(equity_array)
     drawdown = equity_array - peak
     daily = np.diff(equity_array)
     std_daily = float(np.std(daily, ddof=1)) if daily.size > 1 else 0.0
-    sharpe = float(np.mean(daily) / std_daily * np.sqrt(252)) if std_daily > 0 else 0.0
+    sharpe = float(np.mean(daily) / std_daily) if std_daily > 0 else 0.0
     summary = {
         "evaluation": "in_sample_full_series_ols",
         "hedge_ratio": float(hedge),
@@ -133,9 +155,13 @@ def backtest(x: np.ndarray, y: np.ndarray, window: int, entry_z: float,
         "spread_mean": float(np.mean(spread)),
         "spread_std": float(np.std(spread, ddof=1)),
         "trades": len(trades),
-        "total_return": float(equity_array[-1]),
+        "total_pnl": float(equity_array[-1]),
+        "pnl_units": "spread_price_units",
+        "total_return": float(equity_array[-1]),  # Compatibility alias; not a percentage.
         "max_drawdown": float(drawdown.min()) if drawdown.size else 0.0,
-        "sharpe_annualized": sharpe,
+        "sharpe_per_period": sharpe,
+        "periods_per_year": periods_per_year,
+        "sharpe_annualized": sharpe * float(np.sqrt(periods_per_year)) if periods_per_year is not None else None,
         "win_rate": float(np.mean([trade["pnl"] > 0 for trade in trades])) if trades else 0.0,
         "window": window,
         "entry_z": entry_z,
@@ -152,7 +178,7 @@ def backtest(x: np.ndarray, y: np.ndarray, window: int, entry_z: float,
     else:
         summary["adf_pvalue"] = float("nan")
 
-    trades_frame = pd.DataFrame(trades)
+    trades_frame = pd.DataFrame(trades, columns=["entry_index", "exit_index", "side", "pnl"])
     return trades_frame, {
         "summary": summary,
         "equity": equity_array,
@@ -197,7 +223,7 @@ def plot_results(result: dict, args: argparse.Namespace) -> None:
 def main() -> int:
     args = parse_args()
     x, y, source = load_series(args)
-    trades, result = backtest(x, y, args.window, args.entry_z, args.exit_z, args.fee_bps)
+    trades, result = backtest(x, y, args.window, args.entry_z, args.exit_z, args.fee_bps, args.periods_per_year)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "pairs_summary.json").write_text(
@@ -205,6 +231,8 @@ def main() -> int:
     trades.to_csv(args.output_dir / "pairs_trades.csv", index=False)
     plot_results(result, args)
     summary = result["summary"]
+    annual_sharpe = (f"{summary['sharpe_annualized']:.3f}"
+                     if summary["sharpe_annualized"] is not None else "not annualized; sampling frequency unspecified")
     lines = [
         "# Cointegration Pairs-Trading Backtest",
         "",
@@ -216,7 +244,9 @@ def main() -> int:
         "- Rolling spread z-score with the configured window.",
         "- Enter long spread at `z <= -entry`, short at `z >= entry`.",
         "- Close a long at `z >= -exit`, or a short at `z <= exit`; no direct reversal.",
-        "- Per-side transaction cost in bps of gross leg value.",
+        "- Signals observed at t-1 execute at that quote for the following interval.",
+        "- Per-side transaction cost in bps of gross leg value; open positions close at the final quote.",
+        "- PnL is in spread price units, not a percentage return on capital.",
         "",
         "## Results",
         "",
@@ -227,7 +257,8 @@ def main() -> int:
         f"| Trades | {summary['trades']} |",
         f"| Total PnL | {summary['total_return']:.6f} |",
         f"| Max drawdown | {summary['max_drawdown']:.6f} |",
-        f"| Sharpe (annualized) | {summary['sharpe_annualized']:.3f} |",
+        f"| Sharpe (per period) | {summary['sharpe_per_period']:.3f} |",
+        f"| Sharpe (annualized) | {annual_sharpe} |",
         f"| Win rate | {summary['win_rate']:.2%} |",
         "",
         "![Pairs trading equity and z-score](benchmarks/plots/pairs/pairs_equity.png)",

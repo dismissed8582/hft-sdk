@@ -30,6 +30,17 @@ const std::vector<signal::SignalSnapshot>& OBIFilterEngine::snapshots() const {
     return pipeline_->snapshots();
 }
 
+std::optional<signal::SignalSnapshot> OBIFilterEngine::latest_snapshot() const {
+    const auto* latest = pipeline_->latest_snapshot();
+    return latest ? std::optional<signal::SignalSnapshot>(*latest) : std::nullopt;
+}
+
+EngineStats OBIFilterEngine::stats() const {
+    return {pipeline_->processed_events(), pipeline_->processed_trades(), pipeline_->snapshot_count(), pipeline_->total_snapshots(),
+            pipeline_->evicted_snapshots(), pipeline_->out_of_order_events(),
+            pipeline_->invalid_events(), pipeline_->tracker_dropped(), pipeline_->skipped_samples()};
+}
+
 std::vector<signal::SignalMetrics> OBIFilterEngine::metrics() const {
     return signal::calculate_metrics(pipeline_->snapshots());
 }
@@ -48,3 +59,4 @@ const EngineConfig& OBIFilterEngine::config() const noexcept {
 }
 
 } // namespace hft::sdk
+

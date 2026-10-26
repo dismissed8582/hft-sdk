@@ -249,7 +249,14 @@ inline std::uint64_t read_hl_book_diffs(const std::string& path,
                                         Sink&& sink) {
     std::uint64_t emitted = 0;
     std::uint64_t line_index = 0;
+    if (options.base_timestamp_ns < 0 || options.timestamp_step_ns < 0) {
+        throw std::invalid_argument("invalid synthetic Hyperliquid timestamps");
+    }
     for_each_line(path, [&](std::string_view line) {
+        if (options.timestamp_step_ns != 0 && line_index > static_cast<std::uint64_t>(
+            (std::numeric_limits<std::int64_t>::max() - options.base_timestamp_ns) / options.timestamp_step_ns)) {
+            throw std::runtime_error("synthetic timestamp overflow");
+        }
         const std::int64_t timestamp =
             options.base_timestamp_ns +
             static_cast<std::int64_t>(line_index) * options.timestamp_step_ns;
@@ -374,16 +381,17 @@ inline std::uint64_t read_hl_trades(const std::string& path,
 
 [[nodiscard]] inline MarketEvent to_market_event(
     const HlOrderStatus& status, const BookState& book, double price_scale,
-    double quantity_scale) noexcept {
+    double quantity_scale) {
     MarketEvent event{};
     event.order_id = status.order_id;
     event.timestamp_ns = status.timestamp_ns;
     event.price_ticks =
-        static_cast<std::int64_t>(std::llround(status.limit_price * price_scale));
+        scaled_integer(status.limit_price, price_scale);
     event.quantity =
-        static_cast<std::int64_t>(std::llround(status.size * quantity_scale));
+        scaled_integer(status.size, quantity_scale);
     event.type = map_hl_status(status.status_id).value_or(EventType::New);
     if (event.type == EventType::Trade) {
+        event.parent_order_id = status.order_id;
         // The resting order was hit on the opposite side.
         event.side = status.is_ask ? Side::Buy : Side::Sell;
     } else {
@@ -400,14 +408,14 @@ inline std::uint64_t read_hl_trades(const std::string& path,
 
 [[nodiscard]] inline MarketEvent to_market_event(
     const HlBookDiff& diff, const BookState& book, double price_scale,
-    double quantity_scale) noexcept {
+    double quantity_scale) {
     MarketEvent event{};
     event.order_id = diff.order_id;
     event.timestamp_ns = diff.timestamp_ns;
     event.price_ticks =
-        static_cast<std::int64_t>(std::llround(diff.price * price_scale));
+        scaled_integer(diff.price, price_scale);
     event.quantity =
-        static_cast<std::int64_t>(std::llround(diff.size * quantity_scale));
+        scaled_integer(diff.size, quantity_scale);
     event.type = diff.type;
     event.side = diff.side;
     std::int64_t bid = 0;
@@ -420,17 +428,18 @@ inline std::uint64_t read_hl_trades(const std::string& path,
 }
 
 [[nodiscard]] inline MarketEvent to_market_event(
-    const HlTrade& trade, double price_scale, double quantity_scale) noexcept {
+    const HlTrade& trade, double price_scale, double quantity_scale) {
     MarketEvent event{};
     event.order_id = trade.trade_id;
     event.timestamp_ns = trade.timestamp_ns;
     event.price_ticks =
-        static_cast<std::int64_t>(std::llround(trade.price * price_scale));
+        scaled_integer(trade.price, price_scale);
     event.quantity =
-        static_cast<std::int64_t>(std::llround(trade.quantity * quantity_scale));
+        scaled_integer(trade.quantity, quantity_scale);
     event.type = EventType::Trade;
     event.side = trade.aggressor;
     return event;
 }
 
 } // namespace hft::ingest
+

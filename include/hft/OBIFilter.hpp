@@ -7,23 +7,26 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string_view>
 #include <type_traits>
 
 namespace hft::obi {
 
 struct DirectionalCounts {
-    std::uint32_t bid{0};
-    std::uint32_t ask{0};
-    std::uint32_t buy{0};
-    std::uint32_t sell{0};
+    std::uint64_t bid{0};
+    std::uint64_t ask{0};
+    std::uint64_t buy{0};
+    std::uint64_t sell{0};
 
     [[nodiscard]] constexpr std::uint64_t lob_total() const noexcept {
-        return static_cast<std::uint64_t>(bid) + ask;
+        return bid > std::numeric_limits<std::uint64_t>::max() - ask
+            ? std::numeric_limits<std::uint64_t>::max() : bid + ask;
     }
 
     [[nodiscard]] constexpr std::uint64_t trade_total() const noexcept {
-        return static_cast<std::uint64_t>(buy) + sell;
+        return buy > std::numeric_limits<std::uint64_t>::max() - sell
+            ? std::numeric_limits<std::uint64_t>::max() : buy + sell;
     }
 };
 
@@ -47,14 +50,14 @@ struct OBIValue {
 };
 
 [[nodiscard, gnu::always_inline]] constexpr OBIValue order_book_imbalance(DirectionalCounts counts) noexcept {
-    const std::uint64_t denominator = counts.lob_total();
+    const double denominator = static_cast<double>(counts.bid) + static_cast<double>(counts.ask);
     const double sign = static_cast<double>(counts.ask) - static_cast<double>(counts.bid);
     const double inverse = denominator == 0 ? 0.0 : 1.0 / static_cast<double>(denominator);
     return OBIValue{sign * inverse, denominator != 0};
 }
 
 [[nodiscard, gnu::always_inline]] constexpr OBIValue trade_order_book_imbalance(DirectionalCounts counts) noexcept {
-    const std::uint64_t denominator = counts.trade_total();
+    const double denominator = static_cast<double>(counts.buy) + static_cast<double>(counts.sell);
     const double sign = static_cast<double>(counts.buy) - static_cast<double>(counts.sell);
     const double inverse = denominator == 0 ? 0.0 : 1.0 / static_cast<double>(denominator);
     return OBIValue{sign * inverse, denominator != 0};
@@ -76,7 +79,7 @@ struct OBIValue {
         denominator > 0.0};
 }
 
-[[nodiscard]] constexpr std::uint32_t delta_n(DirectionalCounts counts, Side side,
+[[nodiscard]] constexpr std::uint64_t delta_n(DirectionalCounts counts, Side side,
                                                 bool trade_event) noexcept {
     if (trade_event) {
         return side == Side::Buy ? counts.buy : counts.sell;
@@ -167,6 +170,10 @@ public:
     };
 
     [[nodiscard]] Observation observe(const MarketEvent& event) noexcept {
+        if (event.type == EventType::Trade && event.parent_order_id == 0) {
+            return Observation{FilterState{std::numeric_limits<std::int64_t>::max(), 0,
+                std::numeric_limits<std::int64_t>::max()}, false, false};
+        }
         const std::uint64_t lookup_id =
             event.type == EventType::Trade && event.parent_order_id != 0
                 ? event.parent_order_id
@@ -207,7 +214,11 @@ public:
                     event.timestamp_ns - record->last_modification_ns;
             }
             record->last_modification_ns = event.timestamp_ns;
-            ++record->modifications;
+            if (record->modifications != std::numeric_limits<std::uint32_t>::max()) {
+                ++record->modifications;
+            }
+            // Modify quantity is the absolute remaining size after the change.
+            record->remaining_quantity = event.quantity > 0 ? event.quantity : 0;
         }
 
         if ((event.side == Side::Bid || event.side == Side::Ask) &&
@@ -227,7 +238,7 @@ public:
                     --active_;
                 }
             }
-        } else if (event.type == EventType::Trade &&
+        } else if (event.type == EventType::Trade && event.quantity > 0 &&
                    record->remaining_quantity > 0) {
             record->remaining_quantity -= event.quantity;
             if (record->remaining_quantity <= 0) {
@@ -456,11 +467,19 @@ public:
 
     explicit BucketedRollingCounts(std::int64_t horizon_ns,
                                    std::int64_t bucket_ns = kDefaultBucketNs)
-        : horizon_ns_(horizon_ns > 0 ? horizon_ns : 1),
-          bucket_ns_(bucket_ns > 0 ? bucket_ns : kDefaultBucketNs) {
+        : horizon_ns_(horizon_ns), bucket_ns_(bucket_ns) {
+        if (horizon_ns <= 0 || bucket_ns <= 0 ||
+            horizon_ns / bucket_ns > std::numeric_limits<std::int64_t>::max() - 2) {
+            throw std::invalid_argument("invalid rolling window configuration");
+        }
         const std::int64_t needed = horizon_ns_ / bucket_ns_ + 2;
+        const auto max_capacity = std::numeric_limits<std::size_t>::max() / sizeof(Bucket);
+        if (static_cast<std::uint64_t>(needed) > max_capacity) {
+            throw std::length_error("rolling window is too large");
+        }
         std::size_t capacity = 2;
         while (capacity < static_cast<std::size_t>(needed)) {
+            if (capacity > max_capacity / 2) throw std::length_error("rolling window is too large");
             capacity <<= 1;
         }
         capacity_ = capacity;
@@ -560,8 +579,8 @@ private:
         std::array<WeightedDirectionalCounts, SchemeCount> weights{};
     };
 
-    static_assert(sizeof(Bucket) == 64 +
-                                  SchemeCount * sizeof(WeightedDirectionalCounts));
+    static_assert(sizeof(Bucket) == SchemeCount *
+        (sizeof(DirectionalCounts) + sizeof(WeightedDirectionalCounts)));
 
     [[nodiscard]] static std::int64_t floor_div(std::int64_t value,
                                                 std::int64_t divisor) noexcept {
@@ -712,3 +731,4 @@ private:
 };
 
 }
+

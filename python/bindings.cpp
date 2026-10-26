@@ -382,6 +382,17 @@ PYBIND11_MODULE(_core, m) {
         .def_readonly("average_holding_ns", &hft::backtest::Summary::average_holding_ns)
         .def_readonly("trades", &hft::backtest::Summary::trades);
 
+    py::class_<hft::sdk::EngineStats>(m, "EngineStats")
+        .def_readonly("processed_events", &hft::sdk::EngineStats::processed_events)
+        .def_readonly("processed_trades", &hft::sdk::EngineStats::processed_trades)
+        .def_readonly("snapshots", &hft::sdk::EngineStats::snapshots)
+        .def_readonly("total_snapshots", &hft::sdk::EngineStats::total_snapshots)
+        .def_readonly("evicted_snapshots", &hft::sdk::EngineStats::evicted_snapshots)
+        .def_readonly("out_of_order_events", &hft::sdk::EngineStats::out_of_order_events)
+        .def_readonly("invalid_events", &hft::sdk::EngineStats::invalid_events)
+        .def_readonly("tracker_dropped", &hft::sdk::EngineStats::tracker_dropped)
+        .def_readonly("skipped_samples", &hft::sdk::EngineStats::skipped_samples);
+
     py::class_<hft::sdk::EngineConfig>(m, "EngineConfig")
         .def(py::init<>())
         .def_readwrite("thresholds", &hft::sdk::EngineConfig::thresholds)
@@ -422,14 +433,23 @@ PYBIND11_MODULE(_core, m) {
                 const py::object series = frame.attr("__getitem__")(name);
                 return py::cast<i64_array>(series.attr("to_numpy")());
             };
+            std::optional<i64_array> parents;
+            if (py::cast<bool>(frame.attr("__contains__")("parent_order_id"))) {
+                parents = numeric("parent_order_id");
+            } else if (py::cast<bool>(frame.attr("__contains__")("parent_order_ids"))) {
+                parents = numeric("parent_order_ids");
+            }
             engine.process(events_from_arrays(
                 numeric("order_id"), numeric("timestamp_ns"), numeric("price_ticks"),
                 numeric("quantity"), numeric("bid_price_ticks"),
                 numeric("ask_price_ticks"),
                 series_to_i64(frame, "type", "event_type", "event"),
-                series_to_i64(frame, "side", nullptr, "side")));
+                series_to_i64(frame, "side", nullptr, "side"),
+                parents ? &*parents : nullptr));
         }, py::arg("frame"))
         .def("snapshots", &hft::sdk::OBIFilterEngine::snapshots)
+        .def("latest_snapshot", &hft::sdk::OBIFilterEngine::latest_snapshot)
+        .def("stats", &hft::sdk::OBIFilterEngine::stats)
         .def("metrics", &hft::sdk::OBIFilterEngine::metrics)
         .def("metrics_table", &metrics_table)
         .def("regimes", &hft::sdk::OBIFilterEngine::regimes,
@@ -462,5 +482,10 @@ PYBIND11_MODULE(_core, m) {
         .def("dropped_events", &hft::signal::SignalPipeline<>::dropped_events)
         .def("tracker_dropped", &hft::signal::SignalPipeline<>::tracker_dropped)
         .def("dropped_snapshots", &hft::signal::SignalPipeline<>::dropped_snapshots)
-        .def("skipped_samples", &hft::signal::SignalPipeline<>::skipped_samples);
+        .def("skipped_samples", &hft::signal::SignalPipeline<>::skipped_samples)
+        .def("invalid_events", &hft::signal::SignalPipeline<>::invalid_events)
+        .def("out_of_order_events", &hft::signal::SignalPipeline<>::out_of_order_events)
+        .def("snapshot_count", &hft::signal::SignalPipeline<>::snapshot_count)
+        .def("evicted_snapshots", &hft::signal::SignalPipeline<>::evicted_snapshots);
 }
+
