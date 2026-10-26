@@ -36,10 +36,12 @@ cmake --build "$WORK/header-build" -j "$JOBS" >/dev/null
 # pkg-config must supply public header dependencies as well as linker flags.
 if command -v pkg-config >/dev/null 2>&1; then
     export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-    DEFINES=()
+    # Keep the array nonempty for macOS Bash 3 under set -u.
+    DEFINES=(-UHFT_CONSUMER_HEADER_ONLY)
     if [[ "$HEADER_ONLY" == "ON" ]]; then DEFINES=(-DHFT_CONSUMER_HEADER_ONLY=1); fi
+    PKG_FLAGS="$(pkg-config --cflags --libs hft-sdk)"
     "${CXX:-c++}" "$WORK/main.cpp" "${DEFINES[@]}" -o "$WORK/pkg-consumer" \
-        $(pkg-config --cflags --libs hft-sdk)
+        $PKG_FLAGS
     if [[ "$(uname -s)" == "Darwin" ]]; then
         DYLD_LIBRARY_PATH="$PREFIX/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" "$WORK/pkg-consumer"
     else
