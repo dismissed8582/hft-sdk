@@ -5,6 +5,10 @@
 #include <cerrno>
 #include <cstring>
 #include <functional>
+#include <chrono>
+#include <algorithm>
+#include <fcntl.h>
+#include <poll.h>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -125,14 +129,41 @@ private:
         }
     }
 
-    void handle(int client) {
-        char buffer[4096];
-        const ssize_t received = ::recv(client, buffer, sizeof(buffer) - 1, 0);
-        if (received <= 0) {
-            return;
+    bool wait_ready(int client, short events,
+                    std::chrono::steady_clock::time_point deadline) const {
+        while (running_.load(std::memory_order_acquire)) {
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            if (remaining <= 0) return false;
+            pollfd descriptor{client, events, 0};
+            const int result = ::poll(&descriptor, 1,
+                                      static_cast<int>(std::min<std::int64_t>(remaining, 50)));
+            if (result < 0 && errno != EINTR) return false;
+            if (result > 0) return (descriptor.revents & events) != 0;
         }
-        buffer[received] = '\0';
-        std::istringstream input(buffer);
+        return false;
+    }
+
+    void handle(int client) {
+        const int flags = ::fcntl(client, F_GETFL, 0);
+        if (flags < 0 || ::fcntl(client, F_SETFL, flags | O_NONBLOCK) < 0) return;
+#ifdef SO_NOSIGPIPE
+        int no_sigpipe = 1;
+        ::setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe));
+#endif
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        std::string request_text;
+        char buffer[4096];
+        while (request_text.find("\r\n\r\n") == std::string::npos) {
+            if (request_text.size() >= sizeof(buffer) ||
+                !wait_ready(client, POLLIN, deadline)) return;
+            const ssize_t received = ::recv(client, buffer,
+                                            sizeof(buffer) - request_text.size(), 0);
+            if (received < 0 && (errno == EAGAIN || errno == EINTR)) continue;
+            if (received <= 0) return;
+            request_text.append(buffer, static_cast<std::size_t>(received));
+        }
+        std::istringstream input(request_text);
         Request request;
         std::string version;
         input >> request.method >> request.path >> version;
@@ -148,8 +179,15 @@ private:
         const std::string text = output.str();
         std::size_t written = 0;
         while (written < text.size()) {
+            if (!wait_ready(client, POLLOUT, deadline)) return;
+#ifdef MSG_NOSIGNAL
+            constexpr int send_flags = MSG_NOSIGNAL;
+#else
+            constexpr int send_flags = 0;
+#endif
             const ssize_t sent = ::send(client, text.data() + written,
-                                        text.size() - written, 0);
+                                        text.size() - written, send_flags);
+            if (sent < 0 && (errno == EAGAIN || errno == EINTR)) continue;
             if (sent <= 0) {
                 break;
             }
@@ -164,3 +202,4 @@ private:
 };
 
 } // namespace hft::http
+

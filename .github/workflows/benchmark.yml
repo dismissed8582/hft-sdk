@@ -3,6 +3,7 @@ name: benchmark
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -52,8 +53,14 @@ jobs:
       - name: Python live-parser tests
         run: PYTHONPATH=build python3 -m unittest discover -s python/tests -v
 
+      - name: Generate deterministic smoke fixture
+        run: python3 tools/generate_synthetic_ticks.py --duration 1 --seed 11 --output data/sample_ticks.csv
+
       - name: Smoke-test feed runtime
         run: ./build/hft_feed --replay data/sample_ticks.csv --http-port 0 --replay-speed 1000
+
+      - name: Pairs position-rule tests
+        run: python3 -m unittest discover -s tests -p 'test_pairs.py' -v
 
       - name: Run benchmark and reporting pipeline
         run: ./tools/run_pipeline.sh
@@ -70,3 +77,28 @@ jobs:
             benchmarks/results/
             benchmarks/plots/
             BENCHMARK_REPORT.md
+
+
+  wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip wheel . --no-deps --wheel-dir dist
+      - name: Install and exercise the wheel outside the source tree
+        run: |
+          python -m venv /tmp/hft-wheel-test
+          wheels=(dist/*.whl)
+          /tmp/hft-wheel-test/bin/pip install "${wheels[0]}[live]"
+          cd /tmp
+          /tmp/hft-wheel-test/bin/python -c "import hft_sdk; from hft_sdk.live import create_feed, LiveConfig; hft_sdk.OBIFilterEngine(); create_feed(LiveConfig())"
+          /tmp/hft-wheel-test/bin/hft-sdk --help
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t hft-sdk:ci .
+      - run: python3 tests/smoke_container.py hft-sdk:ci

@@ -1,4 +1,6 @@
 #include "hft/Backtest.hpp"
+#include "hft/Metrics.hpp"
+#include "hft/TickData.hpp"
 #include "hft/Disruptor.hpp"
 #include "hft/OBIFilter.hpp"
 #include "hft/Paper.hpp"
@@ -42,6 +44,37 @@ int failures = 0;
             ++failures;                                                                          \
         }                                                                                        \
     } while (false)
+
+void test_histogram_exposition() {
+    hft::metrics::Registry metrics;
+    auto& histogram = metrics.histogram("latency", {10, 100});
+    for (double value : {1.0, 10.0, 50.0, 200.0}) histogram.observe(value);
+    const auto text = metrics.render();
+    CHECK(text.find("latency_bucket{le=\"10\"} 2\n") != std::string::npos);
+    CHECK(text.find("latency_bucket{le=\"100\"} 3\n") != std::string::npos);
+    CHECK(text.find("latency_bucket{le=\"+Inf\"} 4\n") != std::string::npos);
+    CHECK(text.find("latency_count 4\n") != std::string::npos);
+    CHECK(text.find("latency_sum 261\n") != std::string::npos);
+}
+
+void test_stable_tick_sort() {
+    std::vector<hft::MarketEvent> events(4);
+    for (std::size_t i = 0; i < events.size(); ++i) events[i].order_id = i;
+    events[0].timestamp_ns = 2;
+    events[1].timestamp_ns = 1;
+    events[2].timestamp_ns = 1;
+    events[3].timestamp_ns = 0;
+    hft::data::sort_ticks_by_timestamp(events);
+    CHECK(events[0].order_id == 3);
+    CHECK(events[1].order_id == 1);
+    CHECK(events[2].order_id == 2);
+    CHECK(events[3].order_id == 0);
+    hft::data::sort_ticks_by_timestamp(events);
+    CHECK(events[1].order_id == 1);
+    events.clear();
+    hft::data::sort_ticks_by_timestamp(events);
+    CHECK(events.empty());
+}
 
 void test_types() {
     static_assert(sizeof(hft::MarketEvent) % hft::kCacheLine == 0);
@@ -707,10 +740,7 @@ void test_paper_evaluation() {
     events.push_back(paper_event(14, 400 * ms, EventType::New, Side::Ask, 101));
     events.push_back(paper_event(10, 1100 * ms, EventType::Trade, Side::Buy, 100));
     events.push_back(paper_event(11, 1500 * ms, EventType::Trade, Side::Sell, 105));
-    std::stable_sort(events.begin(), events.end(),
-                     [](const MarketEvent& left, const MarketEvent& right) {
-                         return left.timestamp_ns < right.timestamp_ns;
-                     });
+    hft::data::sort_ticks_by_timestamp(events);
 
     paper::PaperConfig config{};
     config.obi_window_ns = 5'000 * ms;
@@ -743,6 +773,8 @@ void test_paper_evaluation() {
 }
 
 int main() {
+    test_histogram_exposition();
+    test_stable_tick_sort();
     test_types();
     test_obi_math();
     test_weighted_obi();
@@ -775,3 +807,4 @@ int main() {
     std::cout << "all tests passed\n";
     return 0;
 }
+

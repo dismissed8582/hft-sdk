@@ -86,11 +86,13 @@ public:
 
     void render(std::ostream& output, const std::string& name) const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        std::uint64_t cumulative = 0;
         for (std::size_t index = 0; index < buckets_.size(); ++index) {
+            cumulative += counts_[index];
             output << name << "_bucket{le=\"" << buckets_[index] << "\"} "
-                   << counts_[index] << '\n';
+                   << cumulative << '\n';
         }
-        output << name << "_bucket{le=\"+Inf\"} " << counts_.back() << '\n';
+        output << name << "_bucket{le=\"+Inf\"} " << count_ << '\n';
         output << name << "_sum " << sum_ << '\n';
         output << name << "_count " << count_ << '\n';
     }
@@ -157,3 +159,4 @@ private:
 };
 
 } // namespace hft::metrics
+

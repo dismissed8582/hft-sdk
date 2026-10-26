@@ -121,6 +121,16 @@ if(HFT_BUILD_FEED AND UNIX)
     target_link_libraries(hft_feed PRIVATE hft::core Threads::Threads)
 endif()
 
+if(HFT_BUILD_TESTS AND TARGET hft_feed)
+    find_package(Python COMPONENTS Interpreter QUIET)
+    if(Python_Interpreter_FOUND)
+        add_test(NAME hft_feed_runtime
+            COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_feed_runtime.py
+                    --feed $<TARGET_FILE:hft_feed>)
+        set_tests_properties(hft_feed_runtime PROPERTIES TIMEOUT 45)
+    endif()
+endif()
+
 if(HFT_BUILD_FUZZERS AND CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(hft_fuzz_csv tests/fuzz_csv.cpp)
     target_link_libraries(hft_fuzz_csv PRIVATE hft::core)
@@ -256,3 +266,4 @@ if(HFT_BUILD_PYTHON)
         message(WARNING "Python development files not found; skipping pybind11 bindings")
     endif()
 endif()
+

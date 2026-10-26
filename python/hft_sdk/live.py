@@ -60,6 +60,10 @@ class LiveConfig:
     engine: EngineConfig | None = None
 
 
+class FeedSyncError(RuntimeError):
+    """The depth book must be replaced before more events can be processed."""
+
+
 class LiveBook:
     """Persistent level book used to synthesize New/Modify/Cancel events."""
 
@@ -145,6 +149,7 @@ class LiveFeed:
         self._last_message_ns = 0
         self._state = "starting"
         self._last_error = ""
+        self._processing_error = False
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -152,6 +157,8 @@ class LiveFeed:
         self._last_flush = time.monotonic()
         self._last_update_id: int | None = None
         self._synced = False
+        self._pending_snapshot: dict[str, Any] | None = None
+        self._main_task: asyncio.Task | None = None
 
     # -- lifecycle ---------------------------------------------------------
     def start(self) -> None:
@@ -164,21 +171,34 @@ class LiveFeed:
     def stop(self) -> None:
         self._stop.set()
         if self._loop is not None:
-            self._loop.call_soon_threadsafe(lambda: None)
+            try:
+                self._loop.call_soon_threadsafe(self._cancel_main)
+            except RuntimeError:
+                pass  # The worker may have just closed its loop.
         if self._thread is not None:
             self._thread.join(timeout=10.0)
+            if self._thread.is_alive():
+                raise RuntimeError("live feed did not stop within 10 seconds")
             self._thread = None
         self._set_state("stopped")
+
+    def _cancel_main(self) -> None:
+        if self._main_task is not None:
+            self._main_task.cancel()
 
     def _run(self) -> None:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
-            self._loop.run_until_complete(self._main())
+            self._main_task = self._loop.create_task(self._main())
+            self._loop.run_until_complete(self._main_task)
+        except asyncio.CancelledError:
+            pass
         finally:
             self._flush(force=True)
             self._loop.close()
             self._loop = None
+            self._main_task = None
 
     async def _main(self) -> None:
         backoff = self.config.reconnect_initial_s
@@ -233,6 +253,7 @@ class LiveFeed:
                 self.engine.process_arrays(**payload)
         except Exception as error:  # noqa: BLE001
             with self._lock:
+                self._processing_error = True
                 self._dropped += len(payload["order_id"])
                 self._last_error = str(error)
             self._set_state("degraded")
@@ -296,27 +317,36 @@ class BinancePerpFeed(LiveFeed):
             snapshot_task = asyncio.create_task(
                 asyncio.to_thread(self._fetch_snapshot))
             buffered: list[dict[str, Any]] = []
-            while not snapshot_task.done() and not self._stop.is_set():
-                try:
-                    raw = await asyncio.wait_for(websocket.recv(), timeout=0.5)
-                except asyncio.TimeoutError:
-                    continue
-                parsed = json.loads(raw)
-                data = parsed.get("data", parsed)
-                if data.get("e") in {"depthUpdate", "aggTrade", "trade"}:
-                    if len(buffered) < 10_000:
-                        buffered.append(data)
-                    else:
-                        self._dropped += 1
-            snapshot = await snapshot_task
+            try:
+                while not snapshot_task.done() and not self._stop.is_set():
+                    try:
+                        raw = await asyncio.wait_for(websocket.recv(), timeout=0.5)
+                    except asyncio.TimeoutError:
+                        continue
+                    parsed = json.loads(raw)
+                    data = parsed.get("data", parsed)
+                    if data.get("e") in {"depthUpdate", "aggTrade", "trade"}:
+                        if len(buffered) < 10_000:
+                            buffered.append(data)
+                        else:
+                            self._dropped += len(buffered) + 1
+                            self._record_gap(1)
+                            raise FeedSyncError("Binance snapshot buffer overflow")
+                snapshot = await snapshot_task
+            finally:
+                if not snapshot_task.done():
+                    snapshot_task.cancel()
+                await asyncio.gather(snapshot_task, return_exceptions=True)
             self._apply_snapshot(snapshot, timestamp_ns=time.time_ns())
             for data in buffered:
                 if data.get("e") == "depthUpdate":
                     self._handle_depth(data)
                 elif data.get("e") in {"aggTrade", "trade"}:
-                    self._handle_trade(data)
+                    if self._synced:
+                        self._handle_trade(data)
+                    else:
+                        self._dropped += 1
             self._flush(force=True)
-            self._set_state("live")
             while not self._stop.is_set():
                 try:
                     raw = await asyncio.wait_for(websocket.recv(), timeout=1.0)
@@ -329,7 +359,10 @@ class BinancePerpFeed(LiveFeed):
                 if event == "depthUpdate":
                     self._handle_depth(data)
                 elif event in {"aggTrade", "trade"}:
-                    self._handle_trade(data)
+                    if self._synced:
+                        self._handle_trade(data)
+                    else:
+                        self._dropped += 1
                 self._flush()
 
     def _fetch_snapshot(self) -> dict[str, Any]:
@@ -340,30 +373,61 @@ class BinancePerpFeed(LiveFeed):
             return json.loads(response.read())
 
     def _apply_snapshot(self, snapshot: dict[str, Any], timestamp_ns: int) -> None:
+        # A resnapshot starts a new signal epoch: old synthetic order IDs and
+        # rolling counts cannot safely be reconciled with an unrelated snapshot.
+        with self._lock:
+            self._dropped += len(self._arrays["order_id"])
+            for values in self._arrays.values():
+                values.clear()
+            self._processing_error = False
+            self.engine = OBIFilterEngine(
+                self.config.engine if self.config.engine is not None else EngineConfig())
         self._book.clear()
-        self._last_update_id = int(snapshot.get("lastUpdateId", 0))
+        self._last_update_id = int(snapshot["lastUpdateId"])
         self._synced = False
-        for side, key in ((SIDE_BID, "bids"), (SIDE_ASK, "asks")):
-            for price, quantity in snapshot.get(key, []):
-                self._apply_level(timestamp_ns, side, float(price), float(quantity))
+        self._pending_snapshot = snapshot
+        self._set_state("syncing")
+        # Emit snapshot levels at the first bridging diff's exchange timestamp,
+        # rather than wall time (which can put buffered events in the past).
+
+    def _sync_error(self, message: str) -> None:
+        self._record_gap(1)
+        self._synced = False
+        self._pending_snapshot = None
+        self._dropped += len(self._arrays["order_id"])
+        for values in self._arrays.values():
+            values.clear()
+        raise FeedSyncError(message)
 
     def _handle_depth(self, data: dict[str, Any]) -> None:
-        first = int(data.get("U", 0))
-        last = int(data.get("u", 0))
-        if self._last_update_id is not None:
-            if last <= self._last_update_id:
-                return
-            if not self._synced:
-                # Binance aggregates update IDs in the diff stream, so after the
-                # snapshot overlap check we do not treat skipped IDs as loss.
-                if first > self._last_update_id + 1:
-                    self._record_gap(1)
-                self._synced = True
-        self._last_update_id = last
+        first, last = int(data["U"]), int(data["u"])
+        previous = self._last_update_id
+        if previous is None:
+            self._sync_error("Binance depth received without a snapshot")
         timestamp_ns = _timestamp_ns(data.get("E", data.get("T", 0)))
+        if not self._synced:
+            if last < previous:
+                return  # Buffered update predates the snapshot.
+            if not first <= previous <= last:
+                self._sync_error("Binance diff does not bridge the snapshot")
+            snapshot = self._pending_snapshot
+            if snapshot is None:
+                self._sync_error("Binance snapshot is unavailable")
+            for side, key in ((SIDE_BID, "bids"), (SIDE_ASK, "asks")):
+                for price, quantity in snapshot.get(key, []):
+                    self._apply_level(timestamp_ns, side, float(price), float(quantity))
+            self._pending_snapshot = None
+            self._synced = True
+        else:
+            if last <= previous:
+                return  # Duplicate or stale message; never rewind the book.
+            if "pu" not in data or int(data["pu"]) != previous:
+                self._sync_error("Binance depth sequence discontinuity")
+        self._last_update_id = last
         for side, key in ((SIDE_BID, "b"), (SIDE_ASK, "a")):
             for price, quantity in data.get(key, []):
                 self._apply_level(timestamp_ns, side, float(price), float(quantity))
+        self._set_state("degraded" if self._processing_error else "live")
 
     def _apply_level(self, timestamp_ns: int, side: int, price: float,
                      quantity: float) -> None:
@@ -496,3 +560,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

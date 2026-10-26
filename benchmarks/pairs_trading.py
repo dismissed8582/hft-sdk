@@ -65,6 +65,22 @@ def load_series(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarray, str]:
     return x, y, f"synthetic(points={args.points}, seed={args.seed})"
 
 
+def next_position(position: int, z: float, entry_z: float, exit_z: float) -> int:
+    """Close before re-entry; hold the previous position for non-finite signals."""
+    if not np.isfinite(z):
+        return position
+    if position == 0:
+        if z <= -entry_z:
+            return 1
+        if z >= entry_z:
+            return -1
+    elif position > 0 and z >= -exit_z:
+        return 0
+    elif position < 0 and z <= exit_z:
+        return 0
+    return position
+
+
 def backtest(x: np.ndarray, y: np.ndarray, window: int, entry_z: float,
              exit_z: float, fee_bps: float) -> tuple[pd.DataFrame, dict]:
     design = np.column_stack([np.ones(x.size), x])
@@ -85,16 +101,7 @@ def backtest(x: np.ndarray, y: np.ndarray, window: int, entry_z: float,
     entry_side = 0
     for index in range(1, x.size):
         z = zscore[index - 1]
-        if np.isfinite(z):
-            if position == 0:
-                if z <= -entry_z:
-                    position = 1
-                elif z >= entry_z:
-                    position = -1
-            elif position > 0 and z >= -exit_z:
-                position = 0
-            elif position < 0 and z <= exit_z:
-                position = 0
+        position = next_position(position, z, entry_z, exit_z)
         spread_change = spread[index] - spread[index - 1]
         gross = position * spread_change
         cost = abs(position - previous_position) * fee * (abs(y[index]) + abs(hedge * x[index]))
@@ -120,6 +127,7 @@ def backtest(x: np.ndarray, y: np.ndarray, window: int, entry_z: float,
     std_daily = float(np.std(daily, ddof=1)) if daily.size > 1 else 0.0
     sharpe = float(np.mean(daily) / std_daily * np.sqrt(252)) if std_daily > 0 else 0.0
     summary = {
+        "evaluation": "in_sample_full_series_ols",
         "hedge_ratio": float(hedge),
         "intercept": float(intercept),
         "spread_mean": float(np.mean(spread)),
@@ -204,10 +212,10 @@ def main() -> int:
         "",
         "## Strategy",
         "",
-        "- OLS hedge ratio of `y` on `x`.",
+        "- In-sample OLS hedge ratio of `y` on `x`, fit to the entire input series.",
         "- Rolling spread z-score with the configured window.",
         "- Enter long spread at `z <= -entry`, short at `z >= entry`.",
-        "- Exit when `|z| <= exit`.",
+        "- Close a long at `z >= -exit`, or a short at `z <= exit`; no direct reversal.",
         "- Per-side transaction cost in bps of gross leg value.",
         "",
         "## Results",
@@ -226,6 +234,8 @@ def main() -> int:
         "",
         "## Limitations",
         "",
+        "- Full-sample hedge fitting uses future observations relative to early trades.",
+        "  This is an in-sample diagnostic, not a causal evaluation.",
         "- This is a research backtest, not a production execution model.",
         "- Synthetic data is used when no CSV is supplied; it validates the",
         "  implementation rather than demonstrating market alpha.",
@@ -240,3 +250,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
