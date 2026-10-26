@@ -1,7 +1,7 @@
 import unittest
 import numpy as np
 from unittest.mock import patch
-from benchmarks.pairs_trading import next_position, backtest
+from benchmarks.pairs_trading import next_position, backtest, synthetic_series
 
 
 class PositionRuleTests(unittest.TestCase):
@@ -42,6 +42,14 @@ class AccountingTests(unittest.TestCase):
         expected_cost = .001 * (4 * x[0] + 4 * x[2])
         self.assertAlmostEqual(trades.iloc[0]['pnl'], -expected_cost)
         self.assertAlmostEqual(result['equity'][-1], -expected_cost)
+
+    def test_default_synthetic_prices_are_valid(self):
+        x, y = synthetic_series(5000, 7)
+        self.assertTrue(np.all(x > 0) and np.all(y > 0))
+        _, result = backtest(x, y, 60, 2, .5, 1)
+        self.assertTrue(np.isfinite(result["equity"]).all())
+        with self.assertRaises(ValueError):
+            synthetic_series(0, 7)
 
     def test_input_validation(self):
         for x, y in (([], []), ([1, 2], [1]), ([1, np.nan], [2, 3]), ([0, 1], [1, 2])):

@@ -49,13 +49,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def synthetic_series(points: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
+    if points < 2:
+        raise ValueError("synthetic series requires at least two points")
     rng = np.random.default_rng(seed)
     x = np.cumsum(rng.normal(0.0, 1.0, points)) + 100.0
     noise = np.zeros(points)
     for index in range(1, points):
         noise[index] = 0.92 * noise[index - 1] + rng.normal(0.0, 0.8)
     y = 2.0 * x + noise
-    return x, y
+    # Translate both legs together so a random walk cannot produce negative prices.
+    # The spread y - 2*x and its mean-reversion dynamics remain unchanged.
+    offset = max(0.0, 100.0 - float(x.min()), (100.0 - float(y.min())) / 2.0)
+    return x + offset, y + 2.0 * offset
 
 
 def load_series(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarray, str]:
