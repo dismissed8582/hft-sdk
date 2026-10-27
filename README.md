@@ -3,7 +3,7 @@
 A C++20 low-latency market-data and limit-order-book processing SDK with Python bindings, live exchange adapters, reproducible benchmarks, and production-oriented observability.
 
 > [!NOTE]
-> The transport/runtime layers are engineering infrastructure for integration and evaluation. Signal research, paper reproduction, and backtests are research diagnostics — **not evidence of tradable alpha and not a complete live trading system**.
+> The transport/runtime layers are engineering infrastructure for integration and evaluation. Signal research, paper reproduction, and backtests are research diagnostics **not evidence of tradable alpha and not a complete live trading system**.
 
 ## Performance at a glance
 
