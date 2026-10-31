@@ -317,6 +317,26 @@ namespace detail {
     std::size_t index = 0;
     while (index < events.size()) {
         const std::int64_t timestamp_ns = events[index].timestamp_ns;
+
+        // Samples strictly before the next event timestamp must be captured
+        // before that event enters the rolling window. The old ordering pushed
+        // the event first and then back-filled earlier sample times, leaking a
+        // future event into historical OBI observations.
+        const std::int64_t pending_samples = timestamp_ns > next_sample_ns
+            ? (timestamp_ns - next_sample_ns + sample_step - 1) / sample_step
+            : 0;
+        if (pending_samples > static_cast<std::int64_t>(config.max_catchup_samples)) {
+            next_sample_ns = timestamp_ns;
+        }
+        while (next_sample_ns < timestamp_ns) {
+            capture(next_sample_ns);
+            next_sample_ns += sample_step;
+        }
+
+        // Process all events at the current timestamp as one group. If the
+        // sampling grid lands exactly on this timestamp, capture afterwards so
+        // the endpoint remains inclusive, matching the paper's (tau-h, tau]
+        // event-count definition without admitting any event from t > tau.
         while (index < events.size() &&
                events[index].timestamp_ns == timestamp_ns) {
             const MarketEvent& event = events[index];
@@ -348,12 +368,7 @@ namespace detail {
             ++index;
         }
 
-        const std::int64_t pending_samples =
-            (timestamp_ns - next_sample_ns) / sample_step + 1;
-        if (pending_samples > static_cast<std::int64_t>(config.max_catchup_samples)) {
-            next_sample_ns = timestamp_ns;
-        }
-        while (next_sample_ns <= timestamp_ns) {
+        if (next_sample_ns == timestamp_ns) {
             capture(next_sample_ns);
             next_sample_ns += sample_step;
         }

@@ -1,0 +1,148 @@
+name: paper-fix-comparison
+
+on:
+  pull_request:
+    paths:
+      - "include/hft/Paper.hpp"
+      - "python/tests/test_paper_eval_timing.py"
+      - "benchmarks/compare_before_after.py"
+      - ".github/workflows/paper-fix-comparison.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CC: clang
+  CXX: clang++
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang zlib1g-dev
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: benchmarks/requirements.txt
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r benchmarks/requirements.txt
+
+      - name: Check out exact PR base as baseline
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+        run: |
+          git worktree add /tmp/hft-base "$BASE_SHA"
+
+      - name: Build baseline and candidate in Release mode
+        run: |
+          cmake -S /tmp/hft-base -B /tmp/hft-base/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/hft-base/build -j "$(nproc)"
+          cmake -S . -B build-compare -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-compare -j "$(nproc)"
+
+      - name: Candidate unit tests
+        run: ctest --test-dir build-compare --output-on-failure
+
+      - name: Generate one deterministic comparison feed
+        run: |
+          python3 tools/generate_synthetic_ticks.py \
+            --duration 1800 \
+            --seed 11 \
+            --output /tmp/paper_compare_ticks.csv
+
+      - name: Produce baseline and candidate paper observations
+        run: |
+          mkdir -p /tmp/base-paper /tmp/after-paper /tmp/base-plots /tmp/after-plots
+          /tmp/hft-base/build/hft_paper_eval \
+            --ticks /tmp/paper_compare_ticks.csv \
+            --out /tmp/base-paper/paper_ticks.csv \
+            --sample-ms 250 --anchor-ms 15000 --obi-window-ms 10000 \
+            --lifetime-ms 100 --max-mods 3 --mod-time-ms 50
+          ./build-compare/hft_paper_eval \
+            --ticks /tmp/paper_compare_ticks.csv \
+            --out /tmp/after-paper/paper_ticks.csv \
+            --sample-ms 250 --anchor-ms 15000 --obi-window-ms 10000 \
+            --lifetime-ms 100 --max-mods 3 --mod-time-ms 50
+
+      - name: Run identical paper diagnostics
+        run: |
+          python3 /tmp/hft-base/benchmarks/paper_analysis.py \
+            --ticks-csv /tmp/base-paper/paper_ticks.csv \
+            --output-dir /tmp/base-paper \
+            --plots-dir /tmp/base-plots \
+            --report /tmp/base-paper/PAPER_REPORT.md \
+            --dataset /tmp/paper_compare_ticks.csv \
+            --bootstrap-samples 50
+          python3 benchmarks/paper_analysis.py \
+            --ticks-csv /tmp/after-paper/paper_ticks.csv \
+            --output-dir /tmp/after-paper \
+            --plots-dir /tmp/after-plots \
+            --report /tmp/after-paper/PAPER_REPORT.md \
+            --dataset /tmp/paper_compare_ticks.csv \
+            --bootstrap-samples 50
+
+      - name: HFT hot-path benchmark - baseline
+        run: |
+          HFT_BENCHMARK_OUT=/tmp/base_bench.json \
+          HFT_LATENCY_CSV=/tmp/base_latency.csv \
+          /tmp/hft-base/build/hft_bench \
+            --benchmark_filter='Disruptor/Throughput/CacheWarmed|Filter/OrderTracker|OBI/SIMD/Welford|Scoring/Regime/LUT' \
+            --benchmark_repetitions=5 \
+            --benchmark_report_aggregates_only=true \
+            --benchmark_min_time=0.20s
+
+      - name: HFT hot-path benchmark - candidate
+        run: |
+          HFT_BENCHMARK_OUT=/tmp/after_bench.json \
+          HFT_LATENCY_CSV=/tmp/after_latency.csv \
+          ./build-compare/hft_bench \
+            --benchmark_filter='Disruptor/Throughput/CacheWarmed|Filter/OrderTracker|OBI/SIMD/Welford|Scoring/Regime/LUT' \
+            --benchmark_repetitions=5 \
+            --benchmark_report_aggregates_only=true \
+            --benchmark_min_time=0.20s
+
+      - name: Generate HFT-style before/after report
+        run: |
+          mkdir -p benchmarks/results/comparison
+          python3 benchmarks/compare_before_after.py \
+            --before-bench /tmp/base_bench.json \
+            --after-bench /tmp/after_bench.json \
+            --before-latency /tmp/base_latency.csv \
+            --after-latency /tmp/after_latency.csv \
+            --before-binary /tmp/hft-base/build/hft_paper_eval \
+            --after-binary ./build-compare/hft_paper_eval \
+            --dataset /tmp/paper_compare_ticks.csv \
+            --before-paper /tmp/base-paper \
+            --after-paper /tmp/after-paper \
+            --repetitions 9 \
+            --output benchmarks/results/comparison/BEFORE_AFTER.md
+          cp /tmp/base_bench.json benchmarks/results/comparison/base_bench.json
+          cp /tmp/after_bench.json benchmarks/results/comparison/after_bench.json
+          cp /tmp/base_latency.csv benchmarks/results/comparison/base_latency.csv
+          cp /tmp/after_latency.csv benchmarks/results/comparison/after_latency.csv
+          cp -R /tmp/base-paper benchmarks/results/comparison/base-paper
+          cp -R /tmp/after-paper benchmarks/results/comparison/after-paper
+          cat benchmarks/results/comparison/BEFORE_AFTER.md
+
+      - name: Upload comparison artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: paper-fix-before-after
+          if-no-files-found: error
+          path: benchmarks/results/comparison/
