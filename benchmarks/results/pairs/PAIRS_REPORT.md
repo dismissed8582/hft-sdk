@@ -1,5 +1,7 @@
 # Cointegration Pairs-Trading Backtest
 
+> Historical result: predates 1.0.1 correctness changes (quantity/linkage, accounting, and Hawkes fitting/timing). Re-run the corresponding pipeline before using these values for this release.
+
 Source: `synthetic(points=5000, seed=7)`
 
 ## Strategy
@@ -31,4 +33,3 @@ Source: `synthetic(points=5000, seed=7)`
   implementation rather than demonstrating market alpha.
 - The paper's latency optimisation is covered separately by the
   microbenchmark suite; this script focuses on the strategy math.
-

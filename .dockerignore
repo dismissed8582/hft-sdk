@@ -7,3 +7,7 @@ benchmarks/plots
 *.parquet
 __pycache__
 .venv
+
+
+install
+dist

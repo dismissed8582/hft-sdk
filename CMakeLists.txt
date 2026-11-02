@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(hft_lob_engine VERSION 1.0.0 LANGUAGES CXX)
+project(hft_lob_engine VERSION 1.0.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,7 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(HFT_BUILD_TESTS "Build correctness tests" ON)
 option(HFT_BUILD_BENCHMARKS "Build Google Benchmark suite" ON)
 option(HFT_BUILD_EVALUATOR "Build CSV signal evaluator" ON)
-option(HFT_ARCH_NATIVE "Optimize for the local CPU (NEON on Apple silicon)" ON)
+option(HFT_ARCH_NATIVE "Optimize for the local CPU (non-portable build)" OFF)
 option(HFT_BUILD_REPLAY "Build the public-data replay tool" ON)
 option(HFT_BUILD_FEED "Build the production feed runtime" ON)
 option(HFT_BUILD_FUZZERS "Build libFuzzer targets (Clang only)" OFF)
@@ -52,7 +52,7 @@ target_include_directories(hft_core INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_compile_features(hft_core INTERFACE cxx_std_20)
-target_link_libraries(hft_core INTERFACE ${HFT_XSIMD_TARGET})
+target_link_libraries(hft_core INTERFACE ${HFT_XSIMD_TARGET} Threads::Threads)
 
 if(HFT_BUILD_SHARED_SDK)
     add_library(hft_sdk SHARED src/sdk.cpp src/spsc_queue.cpp)
@@ -90,7 +90,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         -fno-math-errno
     )
     if(HFT_ARCH_NATIVE)
-        target_compile_options(hft_core INTERFACE -march=native)
+        target_compile_options(hft_core INTERFACE $<BUILD_INTERFACE:-march=native>)
     endif()
 endif()
 
@@ -202,6 +202,20 @@ install(FILES
     ${CMAKE_CURRENT_BINARY_DIR}/HftSdkConfigVersion.cmake
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/HftSdk)
 
+set(HFT_PC_REQUIRES "xsimd")
+set(HFT_PC_DEFINES "")
+if(ZLIB_FOUND)
+    string(APPEND HFT_PC_REQUIRES " zlib")
+    string(APPEND HFT_PC_DEFINES " -DHFT_WITH_ZLIB=1")
+endif()
+if(HFT_WITH_ARROW)
+    string(APPEND HFT_PC_REQUIRES " arrow parquet")
+    string(APPEND HFT_PC_DEFINES " -DHFT_WITH_ARROW=1")
+endif()
+set(HFT_PC_LIBS "")
+if(HFT_BUILD_SHARED_SDK)
+    set(HFT_PC_LIBS "-L\${libdir} -lhft_sdk")
+endif()
 configure_file(cmake/hft-sdk.pc.in ${CMAKE_CURRENT_BINARY_DIR}/hft-sdk.pc @ONLY)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/hft-sdk.pc
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
@@ -232,12 +246,12 @@ if(HFT_BUILD_PYTHON)
         set_target_properties(hft_sdk_py PROPERTIES
             OUTPUT_NAME "_core"
             LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/hft_sdk")
-        file(COPY
-            python/hft_sdk/__init__.py
-            python/hft_sdk/__main__.py
-            python/hft_sdk/data.py
-            python/hft_sdk/live.py
-            DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/hft_sdk")
+        # configure_file tracks Python source changes; file(COPY) left stale
+        # adapters in the build tree after an incremental native build.
+        foreach(HFT_PYTHON_FILE __init__.py __main__.py data.py live.py)
+            configure_file("python/hft_sdk/${HFT_PYTHON_FILE}"
+                "${CMAKE_CURRENT_BINARY_DIR}/hft_sdk/${HFT_PYTHON_FILE}" COPYONLY)
+        endforeach()
         # The module installs as <prefix>/lib/pythonX.Y/site-packages/hft_sdk/,
         # while libhft_sdk lives in <prefix>/lib, hence three parent hops.
         if(APPLE)
@@ -266,4 +280,3 @@ if(HFT_BUILD_PYTHON)
         message(WARNING "Python development files not found; skipping pybind11 bindings")
     endif()
 endif()
-

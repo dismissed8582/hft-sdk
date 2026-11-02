@@ -78,6 +78,45 @@ class FeedRuntimeTests(unittest.TestCase):
         self.send("1500000000,NEW,BID,3,100,1,100,101,,4\n")
         self.wait_health(lambda h: h["events"] == 3 and h["status"] == "degraded")
 
+    def test_duplicate_sequence_is_not_processed_twice(self) -> None:
+        self.send("1000000000,NEW,BID,1,100,1,100,101,,1\n")
+        self.wait_health(lambda h: h["events"] == 1)
+        self.send("1000000000,NEW,BID,1,100,1,100,101,,1\n")
+        health = self.wait_health(lambda h: h["dropped"] == 1)
+        self.assertEqual(health["events"], 1)
+        self.assertEqual(health["status"], "degraded")
+
+    def test_retention_keeps_current_output_live(self) -> None:
+        port = free_port()
+        process = subprocess.Popen([str(FEED), "--stdin", "--http-port", str(port),
+                                    "--max-snapshots", "2"], stdin=subprocess.PIPE,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
+        try:
+            process.stdin.write("".join(f"{i*250000000},NEW,BID,{i+1},100,1,100,101\n" for i in range(6)))
+            process.stdin.flush()
+            deadline = time.monotonic() + 5
+            metrics = ""
+            while time.monotonic() < deadline:
+                try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=2) as response:
+                        metrics = response.read().decode()
+                    if "hft_snapshots_total 5\n" in metrics:
+                        break
+                except OSError:
+                    pass
+                time.sleep(.02)
+            self.assertIn("hft_snapshots_total 5\n", metrics)
+            self.assertIn("hft_snapshot_evictions_total 3\n", metrics)
+            self.assertIn("hft_feed_state 1\n", metrics)
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            process.stdin.close()
+
     def test_invalid_optional_field_is_rejected(self) -> None:
         self.send("1000000000,NEW,BID,1,100,1,100,101,bad-parent,1\n")
         self.wait_health(lambda h: h["status"] == "degraded")

@@ -1,4 +1,5 @@
 import csv
+import os
 import subprocess
 import tempfile
 import unittest
@@ -8,7 +9,7 @@ from pathlib import Path
 class PaperEvalTimingTests(unittest.TestCase):
     def test_future_event_is_not_visible_in_earlier_sample(self) -> None:
         """A 1.00s event must not appear in the 0.25/0.50/0.75s OBI samples."""
-        binary = Path("build/hft_paper_eval")
+        binary = Path(os.environ.get("HFT_TEST_BUILD_DIR", "build")) / "hft_paper_eval"
         self.assertTrue(binary.exists(), f"missing test binary: {binary}")
 
         with tempfile.TemporaryDirectory() as directory:

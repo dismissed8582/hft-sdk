@@ -438,14 +438,22 @@ def _ct_transition_events(data: pd.DataFrame, regime_column: str) -> list[tuple[
         if previous_obi is None or obi_regime != previous_obi:
             events.append((float(timestamp), int(obi_regime)))
         if previous_return is None or return_regime != previous_return:
-            events.append((float(timestamp), OBI_REGIMES + int(return_regime)))
+            # The forward one-second return is observable only at the end of
+            # its window, never at the signal's observation timestamp.
+            events.append((float(timestamp) + 1.0, OBI_REGIMES + int(return_regime)))
         previous_obi = int(obi_regime)
         previous_return = int(return_regime)
     return events
 
 
 def _ct_hawkes_mle(events: list[tuple[float, int]], state_count: int,
-                   half_lives: list[float], ridge: float) -> dict | None:
+                   half_lives: list[float], ridge: float,
+                   max_iterations: int = 2000) -> dict | None:
+    if (state_count < 1 or not half_lives or max_iterations < 1 or
+            not np.isfinite(half_lives).all() or min(half_lives) <= 0 or
+            not np.isfinite(ridge) or ridge < 0 or
+            any(not np.isfinite(t) or not 0 <= s < state_count for t, s in events)):
+        raise ValueError("invalid Hawkes states, times, decay grid or optimization settings")
     if len(events) <= state_count * 3:
         return None
     events = sorted(events, key=lambda item: item[0])
@@ -484,7 +492,6 @@ def _ct_hawkes_mle(events: list[tuple[float, int]], state_count: int,
     integral_terms = np.zeros((state_count, count), dtype=float)
     for state, timestamp in zip(states, times):
         integral_terms[state, :] += 1.0 - np.exp(-decay_rates * (total_time - timestamp))
-    integral_flat = np.tile(integral_terms.reshape(-1), (state_count, 1))
 
     # Poisson multiplicative updates (EM/MM) for the nonnegative amplitudes.
     # For each target state this maximises the continuous-time likelihood with
@@ -497,44 +504,55 @@ def _ct_hawkes_mle(events: list[tuple[float, int]], state_count: int,
     alpha_full = np.zeros((state_count, state_count, count), dtype=float)
     converged = True
     iterations = 0
+    total_objective = 0.0
     for target in range(state_count):
         mask = targets_array == target
         design = np.column_stack([np.ones(int(mask.sum())), features[mask]])
         beta = np.full(design.shape[1], 0.01, dtype=float)
         beta[0] = max(event_counts[target] / max(total_time, 1e-9), 1e-6)
         previous = float("inf")
-        for iteration in range(2000):
+        def objective(coefficients):
+            intensity = np.clip(design @ coefficients, 1e-12, None)
+            return float(-np.sum(np.log(intensity)) + coefficients @ exposure +
+                         0.5 * ridge * (coefficients[1:] @ coefficients[1:]))
+
+        for iteration in range(max_iterations):
             intensity = np.clip(design @ beta, 1e-12, None)
-            negative = float(-np.sum(np.log(intensity)) + beta @ exposure)
+            negative = objective(beta)
             if not np.isfinite(negative):
                 converged = False
                 break
-            ratio = (design.T @ (1.0 / intensity)) / np.maximum(exposure, 1e-12)
+            penalty = ridge * beta.copy()
+            penalty[0] = 0.0
+            ratio = (design.T @ (1.0 / intensity)) / np.maximum(exposure + penalty, 1e-12)
             updated = np.maximum(beta * ratio, 1e-12)
             # Damped step if the MM update violates monotonicity.
-            candidate_intensity = np.clip(design @ updated, 1e-12, None)
-            candidate = float(-np.sum(np.log(candidate_intensity)) +
-                              updated @ exposure)
-            if candidate > negative:
+            candidate = objective(updated)
+            for _ in range(40):
+                if np.isfinite(candidate) and candidate <= negative:
+                    break
                 updated = np.sqrt(beta * updated)
-                candidate_intensity = np.clip(design @ updated, 1e-12, None)
-                candidate = float(-np.sum(np.log(candidate_intensity)) +
-                                  updated @ exposure)
+                candidate = objective(updated)
+            else:
+                converged = False
+                previous = negative
+                break
             beta = updated
             iterations = max(iterations, iteration + 1)
-            if abs(previous - candidate) <= 1e-10 * max(1.0, abs(previous)):
+            if np.isfinite(previous) and abs(previous - candidate) <= 1e-10 * max(1.0, abs(previous)):
                 previous = candidate
                 break
             previous = candidate
         else:
             converged = False
         alpha_full[target] = beta[1:].reshape(state_count, count)
+        total_objective += previous
     kernel = alpha_full.sum(axis=2)
     return {
         "kernel": kernel,
         "success": bool(converged),
         "events": int(targets_array.size),
-        "objective": float(previous) if np.isfinite(previous) else float("nan"),
+        "objective": float(total_objective) if np.isfinite(total_objective) else float("nan"),
         "iterations": int(iterations),
     }
 
@@ -642,6 +660,8 @@ def hawkes_analysis(frame: pd.DataFrame, args: argparse.Namespace) -> dict | Non
                 "signal": signal_name,
                 "estimator": estimator,
                 "fit_success": fit_success,
+                "fit_iterations": fit["iterations"] if estimator == "ct-mle" else None,
+                "fit_objective": fit["objective"] if estimator == "ct-mle" else None,
                 "kernel": reported,
                 "cross": cross,
                 "samples": samples,
@@ -721,6 +741,8 @@ def write_outputs(args: argparse.Namespace, frame: pd.DataFrame,
                 "signal": result["signal"],
                 "estimator": result["estimator"],
                 "fit_success": result["fit_success"],
+                "fit_iterations": result["fit_iterations"],
+                "fit_objective": result["fit_objective"],
                 "samples": result["samples"],
                 "spectral_radius": result["spectral_radius"],
                 "reported_spectral_radius": result["reported_spectral_radius"],
@@ -855,13 +877,13 @@ def write_report(args: argparse.Namespace, pearson: pd.DataFrame,
         lines += [
             "## 3. Hawkes excitation",
             "",
-            "| Scheme | Signal | Estimator | Samples | Spectral radius | Reported radius | Aligned norm | Aligned sum |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| Scheme | Signal | Estimator | Converged | Samples | Spectral radius | Reported radius | Aligned norm | Aligned sum |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
         for result in hawkes.values():
             lines.append(
                 f"| {result['scheme']} | {result['signal']} | {result['estimator']} | "
-                f"{result['samples']} | {result['spectral_radius']:.6f} | "
+                f"{result['fit_success']} | {result['samples']} | {result['spectral_radius']:.6f} | "
                 f"{result['reported_spectral_radius']:.6f} | "
                 f"{result['aligned_norm']:.6f} | {result['aligned_sum']:.6f} |"
             )
@@ -904,6 +926,10 @@ def write_report(args: argparse.Namespace, pearson: pd.DataFrame,
         "- The Hawkes estimator uses a fixed decay grid. It is a",
         "  profile-likelihood MLE over amplitudes, not a joint free optimisation",
         "  of every decay rate.",
+        "- The continuous-time return regime is timestamped at t+1s, when the",
+        "  one-second forward window is observable. Non-converged fits must",
+        "  not be interpreted as fitted evidence. Excitation remains an",
+        "  observational diagnostic, not proof of causal or tradable effects.",
         "- The public Binance/crypto-lob data used here does not provide",
         "  parent order IDs for trades, so parent-filtered OBI(T) is only",
         "  available on data that carries that linkage.",

@@ -1,5 +1,7 @@
 # Low-Latency LOB Engine: Benchmark & Signal-Quality Report
 
+> Historical result: predates 1.0.1 correctness changes (quantity/linkage, accounting, and Hawkes fitting/timing). Re-run the corresponding pipeline before using these values for this release.
+
 *Generated 2026-10-24 15:18 UTC*
 
 ## Abstract

@@ -11,6 +11,8 @@ CMakeCache.txt
 *.so.*
 *.dll
 *.exe
+dist/
+install/
 
 # Python
 __pycache__/
