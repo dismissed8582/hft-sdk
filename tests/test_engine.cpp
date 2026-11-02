@@ -229,6 +229,26 @@ void test_order_tracker() {
     trade.side = hft::Side::Buy;
     observation = tracker.observe(trade);
     CHECK(!observation.found);
+
+    // An unlinked execution ID can collide with an active order ID. It must
+    // not mutate that order; only an explicit parent link may apply a fill.
+    hft::MarketEvent active{};
+    active.order_id = 900;
+    active.type = hft::EventType::New;
+    active.timestamp_ns = 10;
+    active.quantity = 10;
+    CHECK(tracker.observe(active).found);
+    hft::MarketEvent collision{};
+    collision.order_id = 900;
+    collision.type = hft::EventType::Trade;
+    collision.quantity = 10;
+    auto unlinked = tracker.observe(collision);
+    CHECK(!unlinked.found);
+    CHECK(tracker.active() == 1);
+    collision.parent_order_id = 900;
+    auto linked = tracker.observe(collision);
+    CHECK(linked.found);
+    CHECK(tracker.active() == 0);
 }
 
 void test_rolling_counts() {

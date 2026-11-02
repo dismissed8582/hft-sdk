@@ -103,9 +103,10 @@ struct FilterMaskTable {
             lifecycle.cancel_ns = event.timestamp_ns;
             break;
         case EventType::Trade: {
-            const std::uint64_t parent = event.parent_order_id != 0
-                ? event.parent_order_id
-                : event.order_id;
+            if (event.parent_order_id == 0) {
+                break; // no lifecycle mutation without explicit parent linkage
+            }
+            const std::uint64_t parent = event.parent_order_id;
             const auto iterator = lifecycles.find(parent);
             if (iterator != lifecycles.end() && iterator->second.saw_new &&
                 event.quantity > 0 && !iterator->second.has_full_execution) {
@@ -343,11 +344,13 @@ namespace detail {
             std::uint8_t mask = kAllSchemes;
             bool skip = false;
             if (config.paper_filters) {
-                const std::uint64_t parent = event.type == EventType::Trade &&
-                    event.parent_order_id != 0
-                    ? event.parent_order_id
-                    : event.order_id;
-                if (event.type == EventType::Cancel && !masks.contains(parent)) {
+                const std::uint64_t parent = event.type == EventType::Trade
+                    ? event.parent_order_id : event.order_id;
+                if (event.type == EventType::Trade && parent == 0) {
+                    // Do not infer linkage from a trade ID: feeds may use separate
+                    // namespaces for executions and resting orders.
+                    mask = kAllSchemes;
+                } else if (event.type == EventType::Cancel && !masks.contains(parent)) {
                     skip = true;
                 } else {
                     mask = masks.get(parent);

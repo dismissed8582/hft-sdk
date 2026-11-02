@@ -167,10 +167,16 @@ public:
     };
 
     [[nodiscard]] Observation observe(const MarketEvent& event) noexcept {
-        const std::uint64_t lookup_id =
-            event.type == EventType::Trade && event.parent_order_id != 0
-                ? event.parent_order_id
-                : event.order_id;
+        if (event.type == EventType::Trade && event.parent_order_id == 0) {
+            return Observation{FilterState{std::numeric_limits<std::int64_t>::max(),
+                                           0,
+                                           std::numeric_limits<std::int64_t>::max()},
+                               false, false};
+        }
+        // Trade IDs may use a separate namespace from resting order IDs.
+        // Only mutate an order lifecycle when the feed provides an explicit link.
+        const std::uint64_t lookup_id = event.type == EventType::Trade
+            ? event.parent_order_id : event.order_id;
         Record* record = locate(lookup_id);
         if (record == nullptr) {
             // A trade is an execution, not a new resting order. A cancel for an
