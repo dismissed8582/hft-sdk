@@ -5,30 +5,37 @@ A C++20 low-latency market-data and limit-order-book processing SDK with Python 
 > [!NOTE]
 > The transport/runtime layers are engineering infrastructure for integration and evaluation. Signal research, paper reproduction, and backtests are research diagnostics **not evidence of tradable alpha and not a complete live trading system**.
 
-## Performance at a glance
+## Verification and scope
 
-Benchmarks below are historical repository measurements, not release thresholds or deployment guarantees. They were measured on an Apple-silicon MacBook Air using a Release build with `-march=native` and Google Benchmark v1.9.1. Re-run on target hardware; keep the generated README values and reports from the same run.
+The release supports portable C++20 builds on Linux/macOS, installed CMake and
+pkg-config consumers, Python 3.9+, deterministic replay, and Binance/Bybit public
+market-data adapters. See [release validation](docs/RELEASE_READINESS.md) for
+checks actually executed and the remaining deployment acceptance steps.
 
-| Benchmark | Result |
-| --- | ---: |
-| RingBuffer vs `std::queue` + mutex at 1M events | **2.71x lower per-event latency** |
-| RingBuffer at 1M events | **3.47 ns/event** |
-| Cache-warm RingBuffer hand-off | **2.0 ns p50 / 3.2 ns p99** |
-| SIMD Welford vs scalar | **2.01x** |
-| Cross-thread Disruptor-style ring | **13.6M events/s** |
-| Cross-thread ring vs queue | **1.18x throughput improvement** |
-| Best real BTCUSDT volume-OBI R² | **0.00292 — no usable alpha demonstrated** |
+The SDK measures event-flow imbalance; it does not reconstruct exchange-level
+individual resting orders from public aggregated depth. The Python adapters
+maintain a local level book and synthesize order IDs. Public trades have no
+parent-order linkage, so filtered trade OBI cannot reproduce parent-linked
+paper results on these feeds.
 
-![Queue vs lock-free RingBuffer latency](benchmarks/plots/queue_vs_ringbuffer.png)
+Historical benchmark/report artifacts are retained for traceability. Their
+numbers predate correctness changes and are not current release performance
+claims. A single-thread queue microbenchmark, a cross-thread hand-off test and
+end-to-end feed latency measure different operations. Re-run the matching
+pipeline on the deployment hardware; include revision, command, build flags,
+host and raw artifacts with any reported result.
 
-The single-thread queue comparison isolates synchronization/allocation overhead rather than multi-core contention. The separate producer-consumer result includes thread creation/join and is not pinned-core. Neither measurement is end-to-end feed latency or production capacity. Results are hardware- and compiler-dependent.
+| Evidence | Purpose | Command |
+| --- | --- | --- |
+| C++ and runtime tests | Correctness and health/shutdown behavior | `ctest --test-dir build --output-on-failure` |
+| Python SDK/adapters | Installed bindings and protocol fixtures | `PYTHONPATH=build python3 -m unittest discover -s python/tests -v` |
+| Research/accounting tests | PnL, lifecycle and Hawkes regressions | `python3 -m unittest discover -s tests -p 'test_*.py' -v` |
+| External SDK consumers | Real processing from installed CMake/pkg-config exports | `./tools/test_consumer.sh` |
+| Microbenchmarks | Host-specific transport measurements | `./tools/run_lowlatency_bench.sh` |
 
-Full reports and raw artifacts:
-
-- [`BENCHMARK_REPORT.md`](BENCHMARK_REPORT.md)
-- [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)
-- [`benchmarks/results/REAL_DATA_REPORT.md`](benchmarks/results/REAL_DATA_REPORT.md)
-- [`benchmarks/results/lowlatency/LOW_LATENCY_REPORT.md`](benchmarks/results/lowlatency/LOW_LATENCY_REPORT.md)
+See [research reproduction](docs/REPRODUCTION.md),
+[verification commands](docs/VALIDATION.md), and
+[known limitations](docs/RELEASE_READINESS.md#deployment-acceptance).
 
 ## What this project demonstrates
 
@@ -102,7 +109,7 @@ python3 -m pip install ".[live]"
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-  -DHFT_BUILD_SHARED_SDK=ON \
+  -DHFT_BUILD_SHARED_SDK=ON -DHFT_ARCH_NATIVE=OFF \
   -DHFT_BUILD_PYTHON=ON
 cmake --build build -j
 cmake --install build --prefix /opt/hft
@@ -142,9 +149,9 @@ It supports file replay, newline-delimited stdin ingestion, config files plus `H
 Containerized runtime:
 
 ```bash
-docker build -t hft-sdk:1.0.0 .
+docker build -t hft-sdk:1.0.1 .
 docker run --rm -i -p 127.0.0.1:9100:9100 \
-  hft-sdk:1.0.0 --config /etc/hft/hft_feed.conf --stdin
+  hft-sdk:1.0.1 --config /etc/hft/hft_feed.conf --stdin
 ```
 
 Operational docs:
@@ -172,46 +179,17 @@ The package can also fetch and normalize public Binance and crypto-lob-stream da
 
 ## Benchmark details
 
-### Lock-free transport
+`./tools/run_lowlatency_bench.sh` produces separate queue/ring hand-off and
+optimization experiments. Its producer-consumer benchmark includes thread
+creation/join, uses different waiting policies (condition variable versus busy
+spin), and is not pinned to specific cores. Batch-amortized nanoseconds per
+operation are not single-message latency percentiles. Do not infer full-system
+capacity or exchange latency from these experiments.
 
-At 1,000,000 events on the benchmark host:
-
-| Transport | ns/event | Relative |
-| --- | ---: | ---: |
-| `std::queue` + mutex | 9.42 | 1.00x |
-| RingBuffer | **3.47** | **2.71x** |
-
-The RingBuffer is preallocated and reuses fixed-capacity storage. The baseline performs a locked push and pop for each event.
-
-### Cache-warm hand-off
-
-| Path | p50 | p90 | p99 |
-| --- | ---: | ---: | ---: |
-| Cache cold | 6.5 ns | 8.5 ns | 10.4 ns |
-| Cache warm | **2.0 ns** | **2.0 ns** | **3.2 ns** |
-
-![Cache-cold vs cache-warm RingBuffer latency](benchmarks/plots/latency_distribution.png)
-
-The latency sampler amortises measurement over batches of 64 hand-offs because timer resolution is too coarse for reliable single-operation timing at this scale.
-
-### Cross-thread producer / consumer
-
-A separate benchmark measures actual hand-off between producer and consumer threads:
-
-| Path | Median ns/event | p99 ns/event | Events/s |
-| --- | ---: | ---: | ---: |
-| `std::queue` + mutex + condition variable | 88.704 | 138.236 | 10,319,034 |
-| Disruptor-style ring + busy spin | **75.227** | **92.563** | **13,635,948** |
-
-![Cross-thread queue vs Disruptor-style ring](benchmarks/plots/lowlatency/threaded_queue_vs_ring.png)
-
-The measured throughput improvement on this laptop run was **1.18x**. This benchmark includes thread creation/join overhead and is intentionally reported separately from the single-thread transport microbenchmark.
-
-### Optimization experiments
-
-Not every optimization wins. The benchmark suite retains negative results instead of tuning them away: some prefetching and SIMD variants are slower than compiler-optimized scalar code on this Apple-silicon host, while SIMD rolling-window work and Welford statistics show measurable gains.
-
-![Selected low-latency microbenchmark results](benchmarks/plots/lowlatency/microbenchmarks.png)
+The checked-in [benchmark report](BENCHMARK_REPORT.md) and
+[low-latency report](benchmarks/results/lowlatency/LOW_LATENCY_REPORT.md) are
+historical snapshots. Negative optimization results are retained. Current
+comparisons must use the same revision, hardware, compiler settings and workloads.
 
 ## Real-data validation
 

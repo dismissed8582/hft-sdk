@@ -1,5 +1,7 @@
 # Low-Latency Transport & Microbenchmark Report
 
+> Historical result: predates 1.0.1 correctness changes (quantity/linkage, accounting, and Hawkes fitting/timing). Re-run the corresponding pipeline before using these values for this release.
+
 Generated from `hft_threaded_bench` and `hft_microbench`.
 
 ## Cross-thread transport
@@ -54,4 +56,3 @@ perf not available; skipping hardware cache counters
 - Negative results are retained: modern compilers auto-vectorise the
   scalar loops, and prefetch/SIMD can regress on Apple silicon. The
   table is a measurement of this build, not a universal ranking.
-

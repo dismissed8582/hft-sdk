@@ -1,25 +1,22 @@
 #include "hft/TickData.hpp"
+#include "hft/ingest/Csv.hpp"
 
 #include <cstddef>
 #include <cstdint>
-#include <fstream>
+#include <sstream>
 #include <string>
 
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size) {
-    const std::string path = "/tmp/hft_fuzz_ticks.csv";
-    {
-        std::ofstream output(path, std::ios::binary | std::ios::trunc);
-        if (!output) {
-            return 0;
-        }
-        output.write(reinterpret_cast<const char*>(data),
-                     static_cast<std::streamsize>(size));
-    }
+    const std::string_view text(reinterpret_cast<const char*>(data), size);
+    double number = 0;
+    std::int64_t timestamp = 0;
+    (void)hft::ingest::parse_double(text, number);
+    (void)hft::ingest::parse_utc_ns(text, timestamp);
+    std::istringstream input(std::string(reinterpret_cast<const char*>(data), size));
     try {
-        (void)hft::data::load_ticks_csv(path);
-    } catch (...) {
-        // Malformed input is expected to throw; the fuzzer checks for crashes,
-        // hangs, and sanitizer findings, not for successful parsing.
+        (void)hft::data::load_ticks_csv(input);
+    } catch (const std::exception&) {
+        // Malformed input is expected to fail cleanly.
     }
     return 0;
 }

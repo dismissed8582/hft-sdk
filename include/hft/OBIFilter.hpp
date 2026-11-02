@@ -7,23 +7,26 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string_view>
 #include <type_traits>
 
 namespace hft::obi {
 
 struct DirectionalCounts {
-    std::uint32_t bid{0};
-    std::uint32_t ask{0};
-    std::uint32_t buy{0};
-    std::uint32_t sell{0};
+    std::uint64_t bid{0};
+    std::uint64_t ask{0};
+    std::uint64_t buy{0};
+    std::uint64_t sell{0};
 
     [[nodiscard]] constexpr std::uint64_t lob_total() const noexcept {
-        return static_cast<std::uint64_t>(bid) + ask;
+        return bid > std::numeric_limits<std::uint64_t>::max() - ask
+            ? std::numeric_limits<std::uint64_t>::max() : bid + ask;
     }
 
     [[nodiscard]] constexpr std::uint64_t trade_total() const noexcept {
-        return static_cast<std::uint64_t>(buy) + sell;
+        return buy > std::numeric_limits<std::uint64_t>::max() - sell
+            ? std::numeric_limits<std::uint64_t>::max() : buy + sell;
     }
 };
 
@@ -47,14 +50,14 @@ struct OBIValue {
 };
 
 [[nodiscard, gnu::always_inline]] constexpr OBIValue order_book_imbalance(DirectionalCounts counts) noexcept {
-    const std::uint64_t denominator = counts.lob_total();
+    const double denominator = static_cast<double>(counts.bid) + static_cast<double>(counts.ask);
     const double sign = static_cast<double>(counts.ask) - static_cast<double>(counts.bid);
     const double inverse = denominator == 0 ? 0.0 : 1.0 / static_cast<double>(denominator);
     return OBIValue{sign * inverse, denominator != 0};
 }
 
 [[nodiscard, gnu::always_inline]] constexpr OBIValue trade_order_book_imbalance(DirectionalCounts counts) noexcept {
-    const std::uint64_t denominator = counts.trade_total();
+    const double denominator = static_cast<double>(counts.buy) + static_cast<double>(counts.sell);
     const double sign = static_cast<double>(counts.buy) - static_cast<double>(counts.sell);
     const double inverse = denominator == 0 ? 0.0 : 1.0 / static_cast<double>(denominator);
     return OBIValue{sign * inverse, denominator != 0};
@@ -76,7 +79,7 @@ struct OBIValue {
         denominator > 0.0};
 }
 
-[[nodiscard]] constexpr std::uint32_t delta_n(DirectionalCounts counts, Side side,
+[[nodiscard]] constexpr std::uint64_t delta_n(DirectionalCounts counts, Side side,
                                                 bool trade_event) noexcept {
     if (trade_event) {
         return side == Side::Buy ? counts.buy : counts.sell;
@@ -152,6 +155,7 @@ public:
     struct alignas(32) Record {
         std::uint64_t order_id{0};
         std::int64_t first_seen_ns{0};
+        std::int64_t last_seen_ns{0};
         std::int64_t last_modification_ns{0};
         std::int64_t last_modification_interval_ns{std::numeric_limits<std::int64_t>::max()};
         std::uint32_t modifications{0};
@@ -164,9 +168,13 @@ public:
         FilterState filters;
         bool terminal{false};
         bool found{false};
+        bool rejected{false};
     };
 
     [[nodiscard]] Observation observe(const MarketEvent& event) noexcept {
+        if (event.timestamp_ns < 0 || event.quantity < 0) {
+            return Observation{FilterState{}, false, false, true};
+        }
         if (event.type == EventType::Trade && event.parent_order_id == 0) {
             return Observation{FilterState{std::numeric_limits<std::int64_t>::max(),
                                            0,
@@ -178,6 +186,11 @@ public:
         const std::uint64_t lookup_id = event.type == EventType::Trade
             ? event.parent_order_id : event.order_id;
         Record* record = locate(lookup_id);
+        if (record && (event.type == EventType::New ||
+                       event.timestamp_ns < record->last_seen_ns)) {
+            // Duplicate active NEWs and stale updates cannot replace a lifecycle.
+            return Observation{FilterState{}, false, false, true};
+        }
         if (record == nullptr) {
             // A trade is an execution, not a new resting order. A cancel for an
             // order we never saw (or already evicted) must not allocate a
@@ -201,6 +214,8 @@ public:
             }
         }
 
+        record->last_seen_ns = event.timestamp_ns;
+
         if (event.type == EventType::New) {
             record->first_seen_ns = event.timestamp_ns;
             record->last_modification_ns = std::numeric_limits<std::int64_t>::min();
@@ -213,7 +228,11 @@ public:
                     event.timestamp_ns - record->last_modification_ns;
             }
             record->last_modification_ns = event.timestamp_ns;
-            ++record->modifications;
+            if (record->modifications != std::numeric_limits<std::uint32_t>::max()) {
+                ++record->modifications;
+            }
+            // Modify quantity is the absolute remaining size after the change.
+            record->remaining_quantity = event.quantity > 0 ? event.quantity : 0;
         }
 
         if ((event.side == Side::Bid || event.side == Side::Ask) &&
@@ -227,20 +246,12 @@ public:
             event.type == EventType::Cancel, true};
 
         if (event.type == EventType::Cancel) {
-            if (record->state == 1) {
-                record->state = 2;
-                if (active_ != 0) {
-                    --active_;
-                }
-            }
-        } else if (event.type == EventType::Trade &&
+            erase(record);
+        } else if (event.type == EventType::Trade && event.quantity > 0 &&
                    record->remaining_quantity > 0) {
             record->remaining_quantity -= event.quantity;
             if (record->remaining_quantity <= 0) {
-                record->state = 2;
-                if (active_ != 0) {
-                    --active_;
-                }
+                erase(record);
             }
         }
         return observation;
@@ -255,6 +266,25 @@ public:
     }
 
 private:
+    void erase(Record* record) noexcept {
+        // Backward-shift deletion keeps searches short after prolonged churn.
+        // Persistent tombstones otherwise eventually force full-table scans.
+        std::size_t hole = static_cast<std::size_t>(record - records_.data());
+        records_[hole].state = 0;
+        --active_;
+        std::size_t index = (hole + 1) & (kCapacity - 1);
+        std::size_t visited = 0;
+        while (visited++ < kCapacity - 1 && records_[index].state == 1) {
+            const auto ideal = static_cast<std::size_t>(hash(records_[index].order_id)) & (kCapacity - 1);
+            if (((index - ideal) & (kCapacity - 1)) >= ((index - hole) & (kCapacity - 1))) {
+                records_[hole] = records_[index];
+                records_[index].state = 0;
+                hole = index;
+            }
+            index = (index + 1) & (kCapacity - 1);
+        }
+    }
+
     [[nodiscard]] static std::uint64_t hash(std::uint64_t value) noexcept {
         value += 0x9e3779b97f4a7c15ULL;
         value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
@@ -285,6 +315,7 @@ private:
             if (record.state != 1) {
                 record.order_id = order_id;
                 record.first_seen_ns = timestamp_ns;
+                record.last_seen_ns = timestamp_ns;
                 record.last_modification_ns = std::numeric_limits<std::int64_t>::min();
                 record.last_modification_interval_ns =
                     std::numeric_limits<std::int64_t>::max();
@@ -462,11 +493,19 @@ public:
 
     explicit BucketedRollingCounts(std::int64_t horizon_ns,
                                    std::int64_t bucket_ns = kDefaultBucketNs)
-        : horizon_ns_(horizon_ns > 0 ? horizon_ns : 1),
-          bucket_ns_(bucket_ns > 0 ? bucket_ns : kDefaultBucketNs) {
+        : horizon_ns_(horizon_ns), bucket_ns_(bucket_ns) {
+        if (horizon_ns <= 0 || bucket_ns <= 0 ||
+            horizon_ns / bucket_ns > std::numeric_limits<std::int64_t>::max() - 2) {
+            throw std::invalid_argument("invalid rolling window configuration");
+        }
         const std::int64_t needed = horizon_ns_ / bucket_ns_ + 2;
+        const auto max_capacity = std::numeric_limits<std::size_t>::max() / sizeof(Bucket);
+        if (static_cast<std::uint64_t>(needed) > max_capacity) {
+            throw std::length_error("rolling window is too large");
+        }
         std::size_t capacity = 2;
         while (capacity < static_cast<std::size_t>(needed)) {
+            if (capacity > max_capacity / 2) throw std::length_error("rolling window is too large");
             capacity <<= 1;
         }
         capacity_ = capacity;
@@ -566,8 +605,8 @@ private:
         std::array<WeightedDirectionalCounts, SchemeCount> weights{};
     };
 
-    static_assert(sizeof(Bucket) == 64 +
-                                  SchemeCount * sizeof(WeightedDirectionalCounts));
+    static_assert(sizeof(Bucket) == SchemeCount *
+        (sizeof(DirectionalCounts) + sizeof(WeightedDirectionalCounts)));
 
     [[nodiscard]] static std::int64_t floor_div(std::int64_t value,
                                                 std::int64_t divisor) noexcept {

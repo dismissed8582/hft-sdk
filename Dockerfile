@@ -25,13 +25,15 @@ FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libstdc++6 ca-certificates \
+        libstdc++6 zlib1g ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /opt/hft /opt/hft
 COPY config/hft_feed.conf /etc/hft/hft_feed.conf
 
 ENV LD_LIBRARY_PATH=/opt/hft/lib
+ENV HFT_HTTP_ADDRESS=0.0.0.0
+USER 10001:10001
 EXPOSE 9100
 ENTRYPOINT ["/opt/hft/bin/hft_feed"]
 CMD ["--config", "/etc/hft/hft_feed.conf"]
